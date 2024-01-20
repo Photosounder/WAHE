@@ -6,7 +6,7 @@ WAHE is the WebAssembly Host Environment, an environment that hosts modules and 
 
 This to me is the logical conclusion of watching very old video game ROMs effectively turn into universal programs that will never break while modern computer programs and plugins age about as well as a banana. Today you can create a NES ROM that would run perfectly well on an emulator that hasn't been updated since the 1990s and that will still work centuries from now because NES emulators will still run your ROM fine, so why not apply that concept in a more powerful way? And while we're at it let's also do away with the concept of programs that forces programmers to control everything directly and gives users or other programmers no opportunity to control what happens (if a program creates a window, goes full screen, tries to open a file from the A: drive, opens a dialog, you can't stop or modify that unless the program's creator goes out of his way to give you a choice).
 
-As it is this is a C library that relies on Wasmtime, although technically the dependency on Wasmtime can be disabled so that only native modules would work.
+As it is this is a C library that relies on https://github.com/bytecodealliance/wasmtime[Wasmtime], although technically the dependency on Wasmtime can be disabled so that only native modules would work.
 
 = Concept
 
@@ -99,7 +99,7 @@ Excited by the idea of seeing something better, you observe all the text message
 
 One-way collaboration also applies to creating a standard of communication between modules, as outlined earlier with the example of the video player. If you create a module that does something novel, you will create a set of commands and messages to control that module and a message format for its outputs. If you're creating a module that interacts with a module that already exists, you will make your module communicate with that module in the way that that module communicates, you will send it the commands it understands and you will interpret the messages it sends back. By doing so you make it more likely that anyone who wants to create a module that serves the same functionality as that original module will also understand the same commands and emit messages in the same way, thus strengthening the position of the original module's mode of communication as a de facto standard. If this newer module adds to this standard by adding new commands it can understand, it might effectively add to this de facto standard, even though no one gathered around to agree on the definition of a standard. Instead by an organic process, module creators would effectively unilaterally contribute to the emergence of de facto standards of communication, validated in parts by the unilateral adoption by others and invalidated in other parts by the lack of interest of others.
 
-=== Code organisation and the failures of libraries
+=== Code organisation and the failure of libraries
 
 Programs fail in another important way. Being in control of what they do and how they do it from the moment they're started invites anarchy in code, programmers organise the code of their programs however they see fit, and the result is usually both ugly and chaotic. A common sign of this anarchy is vast `main()` functions that do way too much in their body. As a result it's hard to do anything with such code bases other than just let them run as programs, it's hard to refactor them into a more library-like structure that would enable their use as something other than programs.
 
