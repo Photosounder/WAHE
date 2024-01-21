@@ -52,7 +52,7 @@ Imagine that you want to create a program that reads video files. You have to fi
 [%hardbreaks]
 "The volume control sucks, it's too sensitive at the bottom and it needs to go beyond 100% when it's too quiet but also not get too loud by accident", so you have to make a better volume control.
 "No subtitle support? Come on!", so you have to both figure out how to read subtitles and how to display them on screen using a library.
-"Can you add an equalizer? Can you add VST support like Foobar 2000 has?" so you learn how to implement an equaliser and you say no to VST hosting.
+"Can you add an equalizer? Can you add VST support like Foobar2000 has?" so you learn how to implement an equaliser and you say no to VST hosting.
 "The subtitles get out of sync sometimes, I need a way to synchronise them manually" so you have to add some controls to do that.
 "The image is too dark sometimes, it would be nice if we could make it brighter in dark scenes", so you consider working on that.
 "I'd like subtitles to go over the black bar at the bottom and not over the video", so you look into it and realise that you render subtitles directly on the video frame and as it is you can't directly draw over the black bars, another headache for you.

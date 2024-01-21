@@ -551,6 +551,8 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	rl_mutex_init(&ctx->mutex);
 	ctx->module_name = sprintf_alloc("%s", get_filename_from_path(path));
 
+	fprintf_rl(stdout, "\n\342\234\247 Initialising module %s\n", ctx->module_name);
+
 	// Store module index so we can know which index a given module has
 	ctx->parent_group = parent_group;
 	ctx->module_id = module_index;
