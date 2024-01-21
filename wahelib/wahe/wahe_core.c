@@ -529,6 +529,8 @@ void wahe_register_commands(wahe_module_t *ctx, char *list)
 	int il, linecount;
 	char **array = arrayise_text(make_string_copy(list), &linecount);
 
+	fprintf_rl(stdout, "Registering commands for module %s:\n%s\n", ctx->module_name, list);
+
 	for (il = 0; il < linecount; il++)
 	{
 		// TODO check for conflicts
@@ -661,7 +663,8 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 
 	// Register commands
 	char *cmd_reg_msg = wahe_send_input(ctx, "Command registration");
-	wahe_register_commands(ctx, cmd_reg_msg);
+	if (cmd_reg_msg)
+		wahe_register_commands(ctx, cmd_reg_msg);
 
 	#ifdef H_ROUZICLIB
 	// Init module's textedit used for transmitting text input
