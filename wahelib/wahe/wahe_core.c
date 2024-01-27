@@ -202,6 +202,9 @@ size_t wasmtime_val_get_address(wasmtime_val_t val)
 
 size_t call_module_malloc(wahe_module_t *ctx, size_t size)
 {
+	if (!ctx->valid)
+		return 0;
+
 	// Native call
 	if (ctx->native)
 	{
@@ -252,6 +255,9 @@ size_t call_module_malloc(wahe_module_t *ctx, size_t size)
 
 size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
 {
+	if (!ctx->valid)
+		return 0;
+
 	// Native call
 	if (ctx->native)
 	{
@@ -310,6 +316,9 @@ size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
 
 void call_module_free(wahe_module_t *ctx, size_t address)
 {
+	if (!ctx->valid)
+		return;
+
 	// Native call
 	if (ctx->native)
 	{
@@ -344,6 +353,9 @@ char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_i
 {
 	size_t ret_msg_addr_s = 0, *ret_msg_addr = &ret_msg_addr_s;
 	int current_module;
+
+	if (!ctx->valid)
+		return NULL;
 
 	wahe_thread_t *thread = wahe_cur_thread;
 	current_module = thread->current_module;
@@ -570,6 +582,14 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	else
 	{
 		#ifdef WAHE_WASMTIME
+		// Load WASM file
+		buffer_t wasm_buf = buf_load_raw_file(path);
+		if (wasm_buf.buf == NULL)
+		{
+			fprintf_rl(stderr, "Module not found at '%s'\n", path);
+			return;
+		}
+
 		wasmtime_error_t *error;
 		wasm_functype_t *func_type;
 
@@ -589,9 +609,6 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 			fprint_wasmtime_error(error, NULL);
 			return;
 		}
-
-		// Load WASM file
-		buffer_t wasm_buf = buf_load_raw_file(path);
 
 		// Compile WASM
 		error = wasmtime_module_new(ctx->engine, wasm_buf.buf, wasm_buf.len, &ctx->module);
