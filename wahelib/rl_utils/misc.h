@@ -11,3 +11,5 @@ extern size_t alloc_enough_pattern(void **buffer, size_t needed_count, size_t al
 #else
   #define DIR_CHAR '/'
 #endif
+
+extern char *make_appdata_path(const char *dirname, const char *filename, const int make_subdir);

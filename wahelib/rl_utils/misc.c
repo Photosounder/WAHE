@@ -451,6 +451,229 @@ char *append_name_to_path(char *dest, const char *path, const char *name)	// app
 	return dest;
 }
 
+uint8_t *sprint_unicode(uint8_t *str, uint32_t c)	// str must be able to hold 1 to 5 bytes and will be null-terminated by this function
+{
+	const uint8_t m6 = 63;
+	const uint8_t	c10x	= 0x80,
+	      		c110x	= 0xC0,
+	      		c1110x	= 0xE0,
+	      		c11110x	= 0xF0;
+
+	if (c < 0x0080)
+	{
+		str[0] = c;
+		if (c > 0)
+			str[1] = '\0';
+	}
+	else if (c < 0x0800)
+	{
+		str[1] = (c & m6) | c10x;
+		c >>= 6;
+		str[0] = c | c110x;
+		str[2] = '\0';
+	}
+	else if (c < 0x10000)
+	{
+		str[2] = (c & m6) | c10x;
+		c >>= 6;
+		str[1] = (c & m6) | c10x;
+		c >>= 6;
+		str[0] = c | c1110x;
+		str[3] = '\0';
+	}
+	else if (c < 0x200000)
+	{
+		str[3] = (c & m6) | c10x;
+		c >>= 6;
+		str[2] = (c & m6) | c10x;
+		c >>= 6;
+		str[1] = (c & m6) | c10x;
+		c >>= 6;
+		str[0] = c | c11110x;
+		str[4] = '\0';
+	}
+	else
+		str[0] = '\0';		// Unicode character doesn't map to UTF-8
+
+	return str;
+}
+
+int codepoint_utf8_size(const uint32_t c)
+{
+	if (c < 0x0080) return 1;
+	if (c < 0x0800) return 2;
+	if (c < 0x10000) return 3;
+	if (c < 0x110000) return 4;
+
+	return 0;
+}
+
+int utf16_char_size(const uint16_t *c)
+{
+	if (c[0] <= 0xD7FF || c[0] >= 0xE000)
+		return 1;
+	else if (c[1]==0)			// if there's an abrupt mid-character stream end
+		return 1;
+	else
+		return 2;
+}
+
+uint32_t utf16_to_unicode32(const uint16_t *c, size_t *index)
+{
+	uint32_t v;
+	size_t size;
+
+	size = utf16_char_size(c);
+
+	if (size > 0 && index)
+		*index += size-1;
+
+	switch (size)
+	{
+		case 1:
+			v = c[0];
+			break;
+		case 2:
+			v = c[0] & 0x3FF;
+			v = v << 10 | (c[1] & 0x3FF);
+			v += 0x10000;
+			break;
+	}
+
+	return v;
+}
+
+size_t strlen_utf16_to_utf8(const uint16_t *str)
+{
+	size_t i, count;
+	uint32_t c;
+
+	for (i=0, count=0; ; i++)
+	{
+		if (str[i]==0)
+			return count;
+
+		c = utf16_to_unicode32(&str[i], &i);
+		count += codepoint_utf8_size(c);
+	}
+}
+
+#define wchar_to_utf8 utf16_to_utf8
+
+uint8_t *utf16_to_utf8(const uint16_t *utf16, uint8_t *utf8)
+{
+	size_t i, j;
+	uint32_t c;
+
+	if (utf16==NULL)
+		return NULL;
+
+	if (utf8==NULL)
+		utf8 = calloc(strlen_utf16_to_utf8(utf16) + 1, sizeof(uint8_t));
+
+	for (i=0, j=0, c=1; c; i++)
+	{
+		c = utf16_to_unicode32(&utf16[i], &i);
+		sprint_unicode(&utf8[j], c);
+		j += codepoint_utf8_size(c);
+	}
+
+	return utf8;
+}
+
+#ifdef _WIN32
+#ifndef SHFOLDERAPI
+#if defined(_SHFOLDER_) || defined(_SHELL32_)
+#define SHFOLDERAPI           STDAPI
+#else
+#define SHFOLDERAPI           EXTERN_C DECLSPEC_IMPORT HRESULT STDAPICALLTYPE
+#endif
+#endif
+SHFOLDERAPI SHGetFolderPathW(_Reserved_ HWND hwnd, _In_ int csidl, _In_opt_ HANDLE hToken, _In_ DWORD dwFlags, _Out_writes_(MAX_PATH) LPWSTR pszPath);
+#endif
+
+char *win_get_system_folder_path(int csidl)
+{
+	char *path = NULL;
+
+	#ifdef _WIN32
+	wchar_t path_w[MAX_PATH];
+
+	SHGetFolderPathW(NULL, csidl, NULL, 0, path_w);
+	//SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, path_w);
+	path = wchar_to_utf8(path_w, NULL);
+	#endif
+
+	return path;
+}
+
+#ifdef __APPLE__
+#include <glob.h>
+#endif
+
+char *make_appdata_path(const char *dirname, const char *filename, const int make_subdir)
+{
+	char *path=NULL, *dirpath=NULL;
+
+	#ifdef _WIN32
+
+	char *origpath = win_get_system_folder_path(0x001a /*CSIDL_APPDATA*/);
+
+	#elif defined(__APPLE__)
+
+	glob_t globbuf;
+	char *origpath=NULL;
+
+	if (glob("~/Library/Application Support/", GLOB_TILDE | GLOB_MARK, NULL, &globbuf)==0)	// globbuf.gl_pathv[0] is the path
+		origpath = globbuf.gl_pathv[0];
+	else
+	{
+		globfree(&globbuf);
+		return NULL;
+	}
+
+	#else
+	char origpath[] = "~/.config/";
+	#endif
+
+	dirpath = append_name_to_path(NULL, origpath, dirname);
+
+	if (make_subdir)
+		create_dir(dirpath);
+
+	if (filename)
+	{
+		path = append_name_to_path(NULL, dirpath, filename);
+		free(dirpath);
+	}
+	else
+		path = dirpath;
+
+	#ifdef _WIN32
+	free(origpath);
+	#endif
+
+	#ifdef __APPLE__
+	globfree(&globbuf);
+	#endif
+
+	return path;
+}
+
+int create_dir(const char *path)	// returns 0 if successful
+{
+	#ifdef _WIN32
+	wchar_t wpath[MAX_PATH*2];
+
+	utf8_to_wchar(path, wpath);
+	return CreateDirectoryW(wpath, NULL) == 0;
+
+	#else
+
+	return mkdir(path, 0755);
+	#endif
+}
+
 // Hashing
 #include "xxh64.c"
 

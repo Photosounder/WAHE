@@ -1029,8 +1029,8 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 				if (end_msg)
 					return_msg_addr = module_sprintf_alloc(ctx, "%s", end_msg);
 			}
-			else
-				fprintf(stderr, "The 'Run thread' command from %s:%s could not be executed because the thread named '%s' couldn't be found.\n", ctx->module_name, thread ? wahe_func_name[thread->current_func] : "(?)", name);
+			//else
+			//	fprintf(stderr, "The 'Run thread' command from %s:%s could not be executed because the thread named '%s' couldn't be found.\n", ctx->module_name, thread ? wahe_func_name[thread->current_func] : "(?)", name);
 			free(name);
 
 			return return_msg_addr;

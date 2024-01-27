@@ -47,7 +47,10 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 {
 	// group has to be a pointer with a fixed location so that pointers to it in the struct wouldn't be dereferenced
 	int i, n[4], is, il, linecount;
-	int module_offset = group->module_count, image_offset = group->image_count;
+	int module_offset = group->module_count;
+	#ifdef H_ROUZICLIB
+	int image_offset = group->image_count;
+	#endif
 	char *line, **line_array = arrayise_text(load_raw_file_dos_conv(filepath, NULL), &linecount);
 	wahe_symbol_table_t symb_module={0}, symb_display={0}, symb_order={0};
 	wahe_thread_t *thread = NULL;
