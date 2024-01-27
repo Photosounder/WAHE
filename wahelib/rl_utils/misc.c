@@ -21,6 +21,21 @@ void swap_ptr(void **a, void **b)
 
 // IO
 
+int check_file_is_readable(const char *path)
+{
+	FILE *file;
+	int ret=0;
+
+	file = fopen_utf8(path, "rb");
+	if (file)
+	{
+		ret = 1;
+		fclose(file);
+	}
+
+	return ret;
+}
+
 uint8_t *load_raw_file(const char *path, size_t *size)
 {
 	FILE *in_file;
