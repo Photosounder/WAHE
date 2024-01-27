@@ -23,9 +23,9 @@ extern "C" {
   #endif
 
   #ifdef WAHE_WASMTIME
-    #define WASM_API_EXTERN
-
     #ifdef _MSC_VER
+      #define WASM_API_EXTERN	// Static linking
+
       #ifdef WASM_API_EXTERN
         #define WASI_API_EXTERN
         #pragma comment (lib, "wasmtime.lib")
