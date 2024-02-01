@@ -22,7 +22,7 @@ enum wahe_func_id
 	WAHE_FUNC_COUNT
 };
 
-// The two enums above must match the names in those arrays (in wahe.c)
+// The two enums above must match the names in those arrays (in wahe_core.c)
 extern const char *wahe_eo_name[];
 extern const char *wahe_func_name[];
 

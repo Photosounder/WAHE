@@ -200,69 +200,59 @@ size_t wasmtime_val_get_address(wasmtime_val_t val)
 }
 #endif // WAHE_WASMTIME
 
-size_t call_module_malloc(wahe_module_t *ctx, size_t size)
+size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enum wahe_func_id func_id)
 {
+	int current_module;
+	size_t ret_val;
+
 	if (!ctx->valid)
 		return 0;
+
+	wahe_thread_t *thread = wahe_cur_thread;
+	current_module = thread->current_module;
+	thread->current_module = ctx->module_id;
 
 	// Native call
 	if (ctx->native)
 	{
-		void *(*func)(size_t) = ctx->dl_func[WAHE_FUNC_MALLOC];
-		return (size_t) func(size);
-	}
+		swap_ptr(&wahe_cur_ctx, &ctx);
 
-	#ifdef WAHE_WASMTIME
-	wasmtime_error_t *error;
-	wasm_trap_t *trap = NULL;
-	wasmtime_val_t ret[1], param[1];
+		switch (func_id)
+		{
+			case WAHE_FUNC_MALLOC:
+			{
+				void *(*func)(size_t) = wahe_cur_ctx->dl_func[WAHE_FUNC_MALLOC];
+				ret_val = (size_t) func(arg[0]);
+				break;
+			}
 
-	// Set params
-	param[0] = wasmtime_val_set_address(ctx, size);
+			case WAHE_FUNC_REALLOC:
+			{
+				void *(*func)(size_t,size_t) = wahe_cur_ctx->dl_func[WAHE_FUNC_REALLOC];
+				ret_val = (size_t) func(arg[0], arg[1]);
+				break;
+			}
 
-	// Call the function
-	wahe_bench_point("calling malloc()", 1);
-	rl_mutex_lock(&ctx->mutex);
-	error = wasmtime_func_call(ctx->context, &ctx->func[WAHE_FUNC_MALLOC], param, 1, ret, 1, &trap);
-	rl_mutex_unlock(&ctx->mutex);
-	wahe_bench_point("malloc() returned", 0);
-	if (error || trap)
-	{
-		fprintf_rl(stderr, "call_module_malloc(ctx, %zu) failed\n", size);
-		fprint_wasmtime_error(error, trap);
-		return 0;
-	}
+			case WAHE_FUNC_FREE:
+			{
+				void (*func)(void *) = wahe_cur_ctx->dl_func[WAHE_FUNC_FREE];
+				func((void *) arg[0]);
+				ret_val = 0;
+				break;
+			}
 
-	// Check result type
-	if (ret[0].kind != ctx->address_type)
-	{
-		fprintf_rl(stderr, "call_module_malloc() expected a type %s result\n", ctx->address_type==WASMTIME_I32 ? "int32_t" : "int64_t");
-		return 0;
-	}
+			default:
+			{
+				char *(*func)(char *) = wahe_cur_ctx->dl_func[func_id];
+				ret_val = (size_t) func((char *) arg[0]);
+			}
+		}
 
-	// Update memory pointer
-	wahe_bench_point("Updating with wahe_get_module_memory()", 0);
-	wahe_get_module_memory(ctx);
-	wahe_bench_point("call_module_malloc() end", -1);
+		swap_ptr(&wahe_cur_ctx, &ctx);
 
-	// Return result
-	return wasmtime_val_get_address(ret[0]);
-
-	#else
-	return 0;
-	#endif // WAHE_WASMTIME
-}
-
-size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
-{
-	if (!ctx->valid)
-		return 0;
-
-	// Native call
-	if (ctx->native)
-	{
-		void *(*func)(size_t,size_t) = ctx->dl_func[WAHE_FUNC_REALLOC];
-		return (size_t) func(address, size);
+		// Restore current_module
+		thread->current_module = current_module;
+		return ret_val;
 	}
 
 	#ifdef WAHE_WASMTIME
@@ -270,43 +260,44 @@ size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
 	wasm_trap_t *trap = NULL;
 	wasmtime_val_t ret[1], param[2];
 
+	if (ctx->func[func_id].store_id == 0)
+		return 0;
+
 	// Set params
-	param[0] = wasmtime_val_set_address(ctx, address);
-	param[1] = wasmtime_val_set_address(ctx, size);
+	for (int i=0; i < arg_count; i++)
+		param[i] = wasmtime_val_set_address(ctx, arg[i]);
 
 	// Call the function
-	wahe_bench_point("calling realloc()", 1);
+	wahe_bench_point("calling function", 1);
+	int prev_func = thread->current_func;
+	thread->current_func = func_id;
 	rl_mutex_lock(&ctx->mutex);
-	error = wasmtime_func_call(ctx->context, &ctx->func[WAHE_FUNC_REALLOC], param, 2, ret, 1, &trap);
+	error = wasmtime_func_call(ctx->context, &ctx->func[func_id], param, arg_count, ret, func_id != WAHE_FUNC_FREE, &trap);
 	rl_mutex_unlock(&ctx->mutex);
-	wahe_bench_point("realloc() returned", 0);
+	thread->current_func = prev_func;
+	wahe_bench_point("function returned", -1);
 	if (error || trap)
 	{
-		fprintf_rl(stderr, "call_module_realloc(ctx, %zu) failed\n", size);
+		fprintf_rl(stderr, "Calling %s:%s() failed\n", ctx->module_name, wahe_func_name[func_id]);
 		fprint_wasmtime_error(error, trap);
 		return 0;
 	}
 
 	// Check result type
-	if (ret[0].kind != ctx->address_type)
-	{
-		fprintf_rl(stderr, "call_module_realloc() expected a type %s result\n", ctx->address_type==WASMTIME_I32 ? "int32_t" : "int64_t");
-		return 0;
-	}
+	if (func_id != WAHE_FUNC_FREE)
+		if (ret[0].kind != ctx->address_type)
+		{
+			fprintf_rl(stderr, "call_module_func_core() expected a type %s result from %s:%s()\n", ctx->address_type==WASMTIME_I32 ? "int32_t" : "int64_t", ctx->module_name, wahe_func_name[func_id]);
+			return 0;
+		}
 
-	// Check NULL result
-	if (wasmtime_val_get_address(ret[0]) == 0)
-	{
-		fprintf_rl(stderr, "call_module_realloc(%s, 0x%zx, %zd) returned NULL\n", ctx->module_name, address, size);
-		return 0;
-	}
+	// Restore current_module
+	thread->current_module = current_module;
 
 	// Update memory pointer
-	wahe_bench_point("Updating with wahe_get_module_memory()", 0);
 	wahe_get_module_memory(ctx);
-	wahe_bench_point("call_module_realloc() end", -1);
 
-	// Return result
+	// Return the raw return value
 	return wasmtime_val_get_address(ret[0]);
 
 	#else
@@ -314,118 +305,52 @@ size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
 	#endif // WAHE_WASMTIME
 }
 
+size_t call_module_malloc(wahe_module_t *ctx, size_t size)
+{
+	return call_module_func_core(ctx, &size, 1, WAHE_FUNC_MALLOC);
+}
+
+size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
+{
+	size_t ret, arg[2];
+
+	// Call realloc
+	arg[0] = address;
+	arg[1] = size;
+	ret = call_module_func_core(ctx, arg, 2, WAHE_FUNC_REALLOC);
+
+	// Check NULL result
+	if (ret == 0)
+		fprintf_rl(stderr, "call_module_realloc(%s, 0x%zx, %zd) returned NULL\n", ctx->module_name, address, size);
+
+	return ret;
+}
+
 void call_module_free(wahe_module_t *ctx, size_t address)
 {
-	if (!ctx->valid)
-		return;
-
-	// Native call
-	if (ctx->native)
-	{
-		void (*func)(void *) = ctx->dl_func[WAHE_FUNC_FREE];
-		func((void *) address);
-		return;
-	}
-
-	#ifdef WAHE_WASMTIME
-	wasmtime_error_t *error;
-	wasm_trap_t *trap = NULL;
-	wasmtime_val_t param[1];
-
-	// Set params
-	param[0] = wasmtime_val_set_address(ctx, address);
-
-	// Call the function
-	wahe_bench_point("calling free()", 1);
-	rl_mutex_lock(&ctx->mutex);
-	error = wasmtime_func_call(ctx->context, &ctx->func[WAHE_FUNC_FREE], param, 1, NULL, 0, &trap);
-	rl_mutex_unlock(&ctx->mutex);
-	wahe_bench_point("free() returned", -1);
-	if (error || trap)
-	{
-		fprintf_rl(stderr, "call_module_free(ctx, %zu) failed\n", address);
-		fprint_wasmtime_error(error, trap);
-	}
-	#endif // WAHE_WASMTIME
+	call_module_func_core(ctx, &address, 1, WAHE_FUNC_FREE);
 }
 
 char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_id func_id, int call_from_eo)
 {
 	size_t ret_msg_addr_s = 0, *ret_msg_addr = &ret_msg_addr_s;
-	int current_module;
-
-	if (!ctx->valid)
-		return NULL;
-
-	wahe_thread_t *thread = wahe_cur_thread;
-	current_module = thread->current_module;
-	thread->current_module = ctx->module_id;
 
 	if (call_from_eo)
 	{
 		// Find where to store the return message address
-		wahe_exec_order_t *eo = &thread->exec_order[thread->current_eo];
+		wahe_exec_order_t *eo = &wahe_cur_thread->exec_order[wahe_cur_thread->current_eo];
 		ret_msg_addr = &eo->ret_msg_addr;
 	}
 
-	// Native call
-	if (ctx->native)
-	{
-		char *(*func)(char *) = ctx->dl_func[func_id];
-		swap_ptr(&wahe_cur_ctx, &ctx);
-		*ret_msg_addr = (size_t) func((char *) message_addr);
-		swap_ptr(&wahe_cur_ctx, &ctx);
-
-		// Restore current_module
-		thread->current_module = current_module;
-		return (char *) *ret_msg_addr;
-	}
-
-	#ifdef WAHE_WASMTIME
-	wasmtime_error_t *error;
-	wasm_trap_t *trap = NULL;
-	wasmtime_val_t ret[1], param[1];
-
-	if (ctx->func[func_id].store_id == 0)
-		return NULL;
-
-	// Set params
-	param[0] = wasmtime_val_set_address(ctx, message_addr);
-
-	// Call the function
-	wahe_bench_point("calling call_module_func()", 1);
-	int prev_func = thread->current_func;
-	thread->current_func = func_id;
-	rl_mutex_lock(&ctx->mutex);
-	error = wasmtime_func_call(ctx->context, &ctx->func[func_id], param, 1, ret, 1, &trap);
-	rl_mutex_unlock(&ctx->mutex);
-	thread->current_func = prev_func;
-	wahe_bench_point("call_module_func() returned", -1);
-	if (error || trap)
-	{
-		fprintf_rl(stderr, "call_module_func() failed\n");
-		fprint_wasmtime_error(error, trap);
-		return NULL;
-	}
-
-	// Restore current_module
-	thread->current_module = current_module;
-
-	// Store the return message address
-	*ret_msg_addr = wasmtime_val_get_address(ret[0]);
-
-	// Update memory pointer
-	wahe_get_module_memory(ctx);
+	// Call function and store the return message address
+	*ret_msg_addr = (size_t) call_module_func_core(ctx, &message_addr, 1, func_id);
 
 	// Return pointer to return message
+	if (ctx->native)
+		return (char *) *ret_msg_addr;
 	if (*ret_msg_addr)
 		return (char *) &ctx->memory_ptr[*ret_msg_addr];
-	else
-		return NULL;
-
-	#else
 	return NULL;
-	#endif // WAHE_WASMTIME
 }
 
 #ifdef H_ROUZICLIB
