@@ -122,6 +122,43 @@ int wahe_get_module_memory(wahe_module_t *ctx)
 
 }
 
+size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_name, int verbosity)
+{
+	size_t addr = 0;
+
+	if (ctx->native)
+	{
+		addr = (size_t) dynlib_find_symbol(ctx->native, symbol_name);
+
+		if (addr == 0 && verbosity == -1)
+			fprintf_rl(stderr, "Error in module %s: symbol %s not found\n", ctx->module_name, symbol_name);
+
+		if (addr && verbosity == 1)
+			fprintf_rl(stdout, "Module #%d %s: symbol %s() found\n", ctx->module_id, ctx->module_name, symbol_name);
+	}
+	else
+	{
+		#ifdef WAHE_WASMTIME
+		wasmtime_extern_t symb_ext;
+
+		if (wasmtime_linker_get(ctx->linker, ctx->context, "", 0, symbol_name, strlen(symbol_name), &symb_ext))
+		{
+			wasmtime_val_t offset;
+			wasmtime_global_get(ctx->context, &symb_ext.of.global, &offset);
+			addr = offset.of.i64;
+
+			if (verbosity == 1)
+				fprintf_rl(stdout, "Module #%d %s: symbol %s found\n", ctx->module_id, ctx->module_name, symbol_name);
+		}
+		else if (verbosity == -1)
+			fprintf_rl(stderr, "Error in module %s: symbol %s not found in wasmtime_linker_get()\n", ctx->module_name, symbol_name);
+
+		#endif // WAHE_WASMTIME
+	}
+
+	return addr;
+}
+
 void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_func_id func_id, int verbosity)
 {
 	if (ctx->native)
@@ -174,6 +211,8 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	wahe_get_module_func(ctx, "module_draw",          WAHE_FUNC_DRAW, 1);
 	wahe_get_module_func(ctx, "module_proc_image",    WAHE_FUNC_PROC_IMAGE, 1);
 	wahe_get_module_func(ctx, "module_proc_sound",    WAHE_FUNC_PROC_SOUND, 1);
+	if (ctx->native == 0)
+		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
 }
 
 #ifdef WAHE_WASMTIME
@@ -255,6 +294,10 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 		return ret_val;
 	}
 
+	// Update CIT Alloc timestamp if present
+	if (ctx->cita_time_addr)
+		*(int32_t*) &ctx->memory_ptr[ctx->cita_time_addr] = get_time_hr() * 100.;
+
 	#ifdef WAHE_WASMTIME
 	wasmtime_error_t *error;
 	wasm_trap_t *trap = NULL;
@@ -321,7 +364,7 @@ size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
 
 	// Check NULL result
 	if (ret == 0)
-		fprintf_rl(stderr, "call_module_realloc(%s, 0x%zx, %zd) returned NULL\n", ctx->module_name, address, size);
+		fprintf_rl(stderr, "call_module_realloc(%s, %#zx, %zd) returned NULL\n", ctx->module_name, address, size);
 
 	return ret;
 }
@@ -608,6 +651,17 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	if (cmd_reg_msg)
 		wahe_register_commands(ctx, cmd_reg_msg);
 
+	// Find CIT Alloc timestamp address
+	if (ctx->heap_base && memcmp(&ctx->memory_ptr[ctx->heap_base], "CITA", 4) == 0)
+	{
+		int version_pos = *(int32_t *)&ctx->memory_ptr[ctx->heap_base+4];
+		char *version = &ctx->memory_ptr[ctx->heap_base + version_pos];
+		if (strcmp(version, "CITA 1.0 32-bit"))
+			fprintf_rl(stderr, "Module %s has an unknown CIT Alloc version: \"%s\"\n", ctx->module_name, version);
+		else
+			ctx->cita_time_addr = ctx->heap_base + 12;
+	}
+
 	#ifdef H_ROUZICLIB
 	// Init module's textedit used for transmitting text input
 	textedit_init(&ctx->input_te, 1);
@@ -824,7 +878,7 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 {
 	wahe_group_t *group = NULL;
 	size_t return_msg_addr = 0;
-	int n, start, end;
+	int i, n, start, end;
 
 	if (message == NULL)
 		return 0;
@@ -886,6 +940,8 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			if (ctx)
 			{
 				group = ctx->parent_group;
+				if (wahe_cur_thread == NULL)
+					wahe_cur_thread = &group->thread[0];
 				done = 1;
 			}
 		}
@@ -1032,6 +1088,45 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			rl_mutex_unlock(&sb->mutex);
 
 			return_msg_addr = module_sprintf_alloc(ctx, "Buffer location: %zi bytes at %#zx", sb->buffer.len, (void *) dst_addr);
+			done = 1;
+		}
+
+		// Return the module ID by giving the name of a module instance used in the .wahe setup file
+		start = end = 0;
+		sscanf(line, "Get ID of module %n%*s%n", &start, &end);
+		if (end)
+		{
+			char *name = make_string_copy_len(&line[start], end-start);
+			for (i=0; i < group->module_count; i++)
+				if (strcmp(group->module[i].wahe_name, name)==0)
+					break;
+
+			if (i < group->module_count)
+				return_msg_addr = module_sprintf_alloc(ctx, "0x%" PRIx64 "->%d", group, group->module[i].module_id);
+
+			free(name);
+			done = 1;
+		}
+
+		// Heap base address in a WASM module
+		dst_module_id[0] = '\0';
+		sscanf(line, "Get heap base of module ID %60s", dst_module_id);
+		if (dst_module_id[0])
+		{
+			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
+			if (dst_ctx && dst_ctx->native == 0)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->heap_base);
+			done = 1;
+		}
+
+		// Memory size of a WASM module
+		dst_module_id[0] = '\0';
+		sscanf(line, "Get memory size of module ID %60s", dst_module_id);
+		if (dst_module_id[0])
+		{
+			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
+			if (dst_ctx && dst_ctx->native == 0)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->memory_size);
 			done = 1;
 		}
 

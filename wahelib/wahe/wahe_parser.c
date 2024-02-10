@@ -103,6 +103,9 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 				wahe_module_init(group, is, &group->module[is], actual_path);
 			}
 			free(module_path);
+
+			// Store instance name
+			group->module[is].wahe_name = make_string_copy(module_name);
 		}
 
 		// Set display

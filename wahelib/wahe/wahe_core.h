@@ -30,6 +30,7 @@ typedef struct
 {
 	int valid;
 	char *module_name;
+	char *wahe_name;
 	int module_id;
 	rl_mutex_t mutex;
 	void *parent_group;	// wahe_group_t *
@@ -50,7 +51,7 @@ typedef struct
 	wasmtime_func_t func[WAHE_FUNC_COUNT];
 	#endif // WAHE_WASMTIME
 	uint8_t *memory_ptr;
-	size_t memory_size;
+	size_t heap_base, memory_size, cita_time_addr;
 
 	// Specific to native modules
 	void *native, *dl_func[WAHE_FUNC_COUNT];
