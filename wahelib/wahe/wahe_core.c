@@ -248,8 +248,11 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 		return 0;
 
 	wahe_thread_t *thread = wahe_cur_thread;
-	current_module = thread->current_module;
-	thread->current_module = ctx->module_id;
+	if (thread)
+	{
+		current_module = thread->current_module;
+		thread->current_module = ctx->module_id;
+	}
 
 	// Native call
 	if (ctx->native)
@@ -290,7 +293,8 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 		swap_ptr(&wahe_cur_ctx, &ctx);
 
 		// Restore current_module
-		thread->current_module = current_module;
+		if (thread)
+			thread->current_module = current_module;
 		return ret_val;
 	}
 
@@ -940,8 +944,6 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			if (ctx)
 			{
 				group = ctx->parent_group;
-				if (wahe_cur_thread == NULL)
-					wahe_cur_thread = &group->thread[0];
 				done = 1;
 			}
 		}
