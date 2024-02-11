@@ -891,7 +891,7 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 	if (thread && thread->current_eo >= 0 && thread->exec_order)
 	{
 		wahe_exec_order_t *eo = &thread->exec_order[thread->current_eo];
-		if (eo && eo->cmd_proc_id && thread->current_cmd_proc_id < eo->cmd_proc_count)
+		if (eo && eo->cmd_proc_id && thread->current_cmd_proc_id < eo->cmd_proc_count && eo->module_id == ctx->module_id)
 		{
 			int dst_module_id = eo->cmd_proc_id[thread->current_cmd_proc_id];
 			wahe_module_t *dst_module = &group->module[dst_module_id];
