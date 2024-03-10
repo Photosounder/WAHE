@@ -17,9 +17,12 @@ extern "C" {
       #define fprintf_rl fprintf
     #endif
     #include "rl_utils/windows_includes.h"
+    #include "rl_utils/dirent.h"
     #include "rl_utils/misc.h"
-    #include "rl_utils/generic_buffer.h"
     #include "rl_utils/threading.h"
+    #include "rl_utils/generic_buffer.h"
+    #include "rl_utils/io_override.h"
+    #include "rl_utils/endian.h"
   #endif
 
   #ifdef WAHE_WASMTIME
@@ -44,6 +47,7 @@ extern "C" {
   #include "wahe/wahe_core.h"
   #include "wahe/wahe_execution.h"
   #include "wahe/wahe_parser.h"
+  #include "wasm/wasm_binary_parser.h"
 
 #ifdef __cplusplus
 }

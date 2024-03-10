@@ -19,6 +19,138 @@ void swap_ptr(void **a, void **b)
 	*b = c;
 }
 
+// Unicode
+
+uint8_t *sprint_unicode(uint8_t *str, uint32_t c)	// str must be able to hold 1 to 5 bytes and will be null-terminated by this function
+{
+	const uint8_t m6 = 63;
+	const uint8_t	c10x	= 0x80,
+	      		c110x	= 0xC0,
+	      		c1110x	= 0xE0,
+	      		c11110x	= 0xF0;
+
+	if (c < 0x0080)
+	{
+		str[0] = c;
+		if (c > 0)
+			str[1] = '\0';
+	}
+	else if (c < 0x0800)
+	{
+		str[1] = (c & m6) | c10x;
+		c >>= 6;
+		str[0] = c | c110x;
+		str[2] = '\0';
+	}
+	else if (c < 0x10000)
+	{
+		str[2] = (c & m6) | c10x;
+		c >>= 6;
+		str[1] = (c & m6) | c10x;
+		c >>= 6;
+		str[0] = c | c1110x;
+		str[3] = '\0';
+	}
+	else if (c < 0x200000)
+	{
+		str[3] = (c & m6) | c10x;
+		c >>= 6;
+		str[2] = (c & m6) | c10x;
+		c >>= 6;
+		str[1] = (c & m6) | c10x;
+		c >>= 6;
+		str[0] = c | c11110x;
+		str[4] = '\0';
+	}
+	else
+		str[0] = '\0';		// Unicode character doesn't map to UTF-8
+
+	return str;
+}
+
+int codepoint_utf8_size(const uint32_t c)
+{
+	if (c < 0x0080) return 1;
+	if (c < 0x0800) return 2;
+	if (c < 0x10000) return 3;
+	if (c < 0x110000) return 4;
+
+	return 0;
+}
+
+int utf16_char_size(const uint16_t *c)
+{
+	if (c[0] <= 0xD7FF || c[0] >= 0xE000)
+		return 1;
+	else if (c[1]==0)			// if there's an abrupt mid-character stream end
+		return 1;
+	else
+		return 2;
+}
+
+uint32_t utf16_to_unicode32(const uint16_t *c, size_t *index)
+{
+	uint32_t v;
+	size_t size;
+
+	size = utf16_char_size(c);
+
+	if (size > 0 && index)
+		*index += size-1;
+
+	switch (size)
+	{
+		case 1:
+			v = c[0];
+			break;
+		case 2:
+			v = c[0] & 0x3FF;
+			v = v << 10 | (c[1] & 0x3FF);
+			v += 0x10000;
+			break;
+	}
+
+	return v;
+}
+
+size_t strlen_utf16_to_utf8(const uint16_t *str)
+{
+	size_t i, count;
+	uint32_t c;
+
+	for (i=0, count=0; ; i++)
+	{
+		if (str[i]==0)
+			return count;
+
+		c = utf16_to_unicode32(&str[i], &i);
+		count += codepoint_utf8_size(c);
+	}
+}
+
+#define wchar_to_utf8 utf16_to_utf8
+
+uint8_t *utf16_to_utf8(const uint16_t *utf16, uint8_t *utf8)
+{
+	size_t i, j;
+	uint32_t c;
+
+	if (utf16==NULL)
+		return NULL;
+
+	if (utf8==NULL)
+		utf8 = calloc(strlen_utf16_to_utf8(utf16) + 1, sizeof(uint8_t));
+
+	for (i=0, j=0, c=1; c; i++)
+	{
+		c = utf16_to_unicode32(&utf16[i], &i);
+		sprint_unicode(&utf8[j], c);
+		j += codepoint_utf8_size(c);
+	}
+
+	return utf8;
+}
+
 // IO
 
 int check_file_is_readable(const char *path)
@@ -34,6 +166,81 @@ int check_file_is_readable(const char *path)
 	}
 
 	return ret;
+}
+
+#ifdef _WIN32
+#define INVALID_HANDLE_VALUE ((HANDLE)(LONG_PTR)-1)	// handleapi.h
+#include "dirent.c"
+#endif
+
+int check_dir_exists(const char *path)
+{
+	DIR *dir;
+	int ret=0;
+
+	dir = opendir(path);
+	if (dir)
+	{
+		ret = 1;
+		closedir(dir);
+	}
+
+	return ret;
+}
+
+int create_dir(const char *path)	// returns 0 if successful
+{
+	#ifdef _WIN32
+	wchar_t wpath[MAX_PATH*2];
+
+	utf8_to_wchar(path, wpath);
+	return CreateDirectoryW(wpath, NULL) == 0;
+
+	#else
+
+	return mkdir(path, 0755);
+	#endif
+}
+
+int create_dir_recursive(const char *path)
+{
+	char parent_path[MAX_PATH*4];
+
+	if (path==NULL)
+		return -1;
+	if (path[0]=='\0')
+		return -1;
+
+	if (check_dir_exists(path))
+		return 0;
+
+	if (create_dir(path) == 0)			// if successful
+		return 0;
+
+	remove_name_from_path(parent_path, path);
+	if (create_dir_recursive(parent_path))		// if creating the parents failed
+		return -1;
+
+	return create_dir(path);			// create the dir after the parents have been created
+}
+
+int create_dirs_for_file(const char *filepath)
+{
+	char parent_path[MAX_PATH*4];
+
+	remove_name_from_path(parent_path, filepath);
+	return create_dir_recursive(parent_path);
+}
+
+FILE *fopen_mkdirs(const char *path, const char *mode)
+{
+	FILE *file;
+
+	file = fopen_utf8(path, mode);
+	if (file)
+		return file;
+
+	return fopen_utf8(path, mode);
 }
 
 uint8_t *load_raw_file(const char *path, size_t *size)
@@ -112,6 +319,27 @@ uint8_t *load_raw_file_dos_conv(const char *path, size_t *size)	// loads raw fil
 		*size = fsize - offset;
 
 	return data;
+}
+
+int save_raw_file(const char *path, const char *mode, uint8_t *data, size_t data_size)
+{
+	FILE *file;
+
+	if (data==NULL)
+		return 0;
+
+	file = fopen_mkdirs(path, mode);
+	if (file==NULL)
+	{
+		fprintf_rl(stderr, "File '%s' not found.\n", path);
+		return 0;
+	}
+
+	fwrite(data, 1, data_size, file);
+
+	fclose(file);
+
+	return 1;
 }
 
 size_t alloc_enough_pattern(void **buffer, size_t needed_count, size_t alloc_count, size_t size_elem, double inc_ratio, uint8_t pattern)
@@ -451,136 +679,6 @@ char *append_name_to_path(char *dest, const char *path, const char *name)	// app
 	return dest;
 }
 
-uint8_t *sprint_unicode(uint8_t *str, uint32_t c)	// str must be able to hold 1 to 5 bytes and will be null-terminated by this function
-{
-	const uint8_t m6 = 63;
-	const uint8_t	c10x	= 0x80,
-	      		c110x	= 0xC0,
-	      		c1110x	= 0xE0,
-	      		c11110x	= 0xF0;
-
-	if (c < 0x0080)
-	{
-		str[0] = c;
-		if (c > 0)
-			str[1] = '\0';
-	}
-	else if (c < 0x0800)
-	{
-		str[1] = (c & m6) | c10x;
-		c >>= 6;
-		str[0] = c | c110x;
-		str[2] = '\0';
-	}
-	else if (c < 0x10000)
-	{
-		str[2] = (c & m6) | c10x;
-		c >>= 6;
-		str[1] = (c & m6) | c10x;
-		c >>= 6;
-		str[0] = c | c1110x;
-		str[3] = '\0';
-	}
-	else if (c < 0x200000)
-	{
-		str[3] = (c & m6) | c10x;
-		c >>= 6;
-		str[2] = (c & m6) | c10x;
-		c >>= 6;
-		str[1] = (c & m6) | c10x;
-		c >>= 6;
-		str[0] = c | c11110x;
-		str[4] = '\0';
-	}
-	else
-		str[0] = '\0';		// Unicode character doesn't map to UTF-8
-
-	return str;
-}
-
-int codepoint_utf8_size(const uint32_t c)
-{
-	if (c < 0x0080) return 1;
-	if (c < 0x0800) return 2;
-	if (c < 0x10000) return 3;
-	if (c < 0x110000) return 4;
-
-	return 0;
-}
-
-int utf16_char_size(const uint16_t *c)
-{
-	if (c[0] <= 0xD7FF || c[0] >= 0xE000)
-		return 1;
-	else if (c[1]==0)			// if there's an abrupt mid-character stream end
-		return 1;
-	else
-		return 2;
-}
-
-uint32_t utf16_to_unicode32(const uint16_t *c, size_t *index)
-{
-	uint32_t v;
-	size_t size;
-
-	size = utf16_char_size(c);
-
-	if (size > 0 && index)
-		*index += size-1;
-
-	switch (size)
-	{
-		case 1:
-			v = c[0];
-			break;
-		case 2:
-			v = c[0] & 0x3FF;
-			v = v << 10 | (c[1] & 0x3FF);
-			v += 0x10000;
-			break;
-	}
-
-	return v;
-}
-
-size_t strlen_utf16_to_utf8(const uint16_t *str)
-{
-	size_t i, count;
-	uint32_t c;
-
-	for (i=0, count=0; ; i++)
-	{
-		if (str[i]==0)
-			return count;
-
-		c = utf16_to_unicode32(&str[i], &i);
-		count += codepoint_utf8_size(c);
-	}
-}
-
-#define wchar_to_utf8 utf16_to_utf8
-
-uint8_t *utf16_to_utf8(const uint16_t *utf16, uint8_t *utf8)
-{
-	size_t i, j;
-	uint32_t c;
-
-	if (utf16==NULL)
-		return NULL;
-
-	if (utf8==NULL)
-		utf8 = calloc(strlen_utf16_to_utf8(utf16) + 1, sizeof(uint8_t));
-
-	for (i=0, j=0, c=1; c; i++)
-	{
-		c = utf16_to_unicode32(&utf16[i], &i);
-		sprint_unicode(&utf8[j], c);
-		j += codepoint_utf8_size(c);
-	}
-
-	return utf8;
-}
-
 #ifdef _WIN32
 #ifndef SHFOLDERAPI
 #if defined(_SHFOLDER_) || defined(_SHELL32_)
@@ -658,20 +756,6 @@ char *make_appdata_path(const char *dirname, const char *filename, const int mak
 	#endif
 
 	return path;
-}
-
-int create_dir(const char *path)	// returns 0 if successful
-{
-	#ifdef _WIN32
-	wchar_t wpath[MAX_PATH*2];
-
-	utf8_to_wchar(path, wpath);
-	return CreateDirectoryW(wpath, NULL) == 0;
-
-	#else
-
-	return mkdir(path, 0755);
-	#endif
 }
 
 // Hashing

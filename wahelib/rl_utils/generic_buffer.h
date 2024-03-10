@@ -8,7 +8,9 @@ typedef struct
 
 extern char *vbufprintf(buffer_t *s, const char *format, va_list args);
 extern char *bufprintf(buffer_t *s, const char *format, ...);
+extern char *bufwrite(buffer_t *s, const uint8_t *ptr, size_t size);
 extern void buf_alloc_enough(buffer_t *s, size_t req_size);
 extern void free_buf(buffer_t *s);
 extern void clear_buf(buffer_t *s);
 extern buffer_t buf_load_raw_file(const char *path);
+extern int buf_save_raw_file(buffer_t *s, const char *path, const char *mode);

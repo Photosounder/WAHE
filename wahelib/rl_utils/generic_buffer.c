@@ -25,6 +25,21 @@ char *bufprintf(buffer_t *s, const char *format, ...)			// like fprintf except f
 	return s->buf;
 }
 
+char *bufwrite(buffer_t *s, const uint8_t *ptr, size_t size)		// like fwrite except for a buffer_t
+{
+	if (s==NULL)
+		return NULL;
+
+	if (ptr)
+	{
+		alloc_enough(&s->buf, size + s->len+1, &s->as, sizeof(char), 1.5);
+		memcpy(&s->buf[s->len], ptr, size);
+		s->len += size;
+	}
+
+	return s->buf;
+}
+
 void buf_alloc_enough(buffer_t *s, size_t req_size)
 {
 	alloc_enough(&s->buf, req_size, &s->as, sizeof(char), 1.);
@@ -57,4 +72,9 @@ buffer_t buf_load_raw_file(const char *path)
 	s.as = s.len + 1;
 
 	return s;
+}
+
+int buf_save_raw_file(buffer_t *s, const char *path, const char *mode)
+{
+	return save_raw_file(path, mode, s->buf, s->len);
 }

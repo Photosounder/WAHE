@@ -211,8 +211,6 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	wahe_get_module_func(ctx, "module_draw",          WAHE_FUNC_DRAW, 1);
 	wahe_get_module_func(ctx, "module_proc_image",    WAHE_FUNC_PROC_IMAGE, 1);
 	wahe_get_module_func(ctx, "module_proc_sound",    WAHE_FUNC_PROC_SOUND, 1);
-	if (ctx->native == 0)
-		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
 }
 
 #ifdef WAHE_WASMTIME
@@ -561,6 +559,14 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 			fprintf_rl(stderr, "Module not found at '%s'\n", path);
 			return;
 		}
+
+		// Parse sections of the WASM binary
+		io_override_set_buffer();
+		wasmbin_read_global_addresses((FILE *) &wasm_buf, &ctx->stack, &ctx->heap_base, &ctx->data_end);
+		wasmbin_read_memory_size((FILE *) &wasm_buf, &ctx->page_count_initial, &ctx->page_count_max);
+		io_override_set_FILE();
+		fprintf_rl(stdout, "Stack %#zx, heap base %#zx, data end %#zx\n", ctx->stack, ctx->heap_base, ctx->data_end);
+		fprintf_rl(stdout, "Initial memory %zu kB, max memory %zu kB\n", ctx->page_count_initial*64ULL, ctx->page_count_max*64ULL);
 
 		wasmtime_error_t *error;
 		wasm_functype_t *func_type;
