@@ -85,9 +85,13 @@ int wahe_get_module_memory(wahe_module_t *ctx)
 	if (ctx == NULL)
 		return 1;
 
-	// Nothing to do if the module is native
+	// Nothing to do if the module is native unless it's wasm-to-native
 	if (ctx->native)
+	{
+		if (ctx->native_memory)
+			ctx->memory_ptr = **ctx->native_memory;
 		return 1;
+	}
 
 	#ifdef WAHE_WASMTIME
 	wasmtime_extern_t item;
@@ -109,7 +113,7 @@ int wahe_get_module_memory(wahe_module_t *ctx)
 
 	// Get pointer to start of module's linear memory and its size
 	ctx->memory_ptr = wasmtime_memory_data(ctx->context, &ctx->memory);
-	size_t current_size = wasmtime_memory_data_size (ctx->context, &ctx->memory);
+	size_t current_size = wasmtime_memory_data_size(ctx->context, &ctx->memory);
 	if (ctx->memory_size != current_size)
 		fprintf_rl(stdout, "Memory of module #%d %s grew from %zd kB to %zd kB\n", ctx->module_id, ctx->module_name, ctx->memory_size >> 10, current_size >> 10);
 	ctx->memory_size = current_size;
@@ -134,7 +138,7 @@ size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_nam
 			fprintf_rl(stderr, "Error in module %s: symbol %s not found\n", ctx->module_name, symbol_name);
 
 		if (addr && verbosity == 1)
-			fprintf_rl(stdout, "Module #%d %s: symbol %s() found\n", ctx->module_id, ctx->module_name, symbol_name);
+			fprintf_rl(stdout, "Module #%d %s: symbol %s found\n", ctx->module_id, ctx->module_name, symbol_name);
 	}
 	else
 	{
@@ -211,6 +215,20 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	wahe_get_module_func(ctx, "module_draw",          WAHE_FUNC_DRAW, 1);
 	wahe_get_module_func(ctx, "module_proc_image",    WAHE_FUNC_PROC_IMAGE, 1);
 	wahe_get_module_func(ctx, "module_proc_sound",    WAHE_FUNC_PROC_SOUND, 1);
+
+	// In case the module is wasm-to-native
+	if (ctx->native)
+	{
+		ctx->native_memory = (uint8_t ***) wahe_get_module_symbol_address(ctx, "memory", 1);
+		if (ctx->native_memory)
+			call_module_free(ctx, 0);	// Initialises the memory buffer
+	}
+
+	if (ctx->native == 0)
+	{
+		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
+		ctx->data_end = wahe_get_module_symbol_address(ctx, "__data_end", 0);
+	}
 }
 
 #ifdef WAHE_WASMTIME
@@ -289,6 +307,9 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 		}
 
 		swap_ptr(&wahe_cur_ctx, &ctx);
+
+		// Update memory pointer for wasm-to-native
+		wahe_get_module_memory(ctx);
 
 		// Restore current_module
 		if (thread)
@@ -562,7 +583,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 
 		// Parse sections of the WASM binary
 		io_override_set_buffer();
-		wasmbin_read_global_addresses((FILE *) &wasm_buf, &ctx->stack, &ctx->heap_base, &ctx->data_end);
+		ctx->stack = wasmbin_read_stack_pointer((FILE *) &wasm_buf);
 		wasmbin_read_memory_size((FILE *) &wasm_buf, &ctx->page_count_initial, &ctx->page_count_max);
 		io_override_set_FILE();
 		fprintf_rl(stdout, "Stack %#zx, heap base %#zx, data end %#zx\n", ctx->stack, ctx->heap_base, ctx->data_end);

@@ -38,6 +38,8 @@ typedef struct
 	textedit_t input_te;
 	#endif
 
+	uint8_t *memory_ptr;
+
 	// Specific to WASM modules
 	#ifdef WAHE_WASMTIME
 	wasm_engine_t *engine;
@@ -50,12 +52,12 @@ typedef struct
 	wasmtime_valkind_t address_type;
 	wasmtime_func_t func[WAHE_FUNC_COUNT];
 	#endif // WAHE_WASMTIME
-	uint8_t *memory_ptr;
 	size_t stack, data_end, heap_base, memory_size, cita_time_addr;
 	uint32_t page_count_initial, page_count_max;
 
 	// Specific to native modules
 	void *native, *dl_func[WAHE_FUNC_COUNT];
+	uint8_t ***native_memory;	// specific to wasm-to-native
 } wahe_module_t;
 
 #ifdef H_ROUZICLIB
