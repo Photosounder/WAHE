@@ -9,6 +9,7 @@ Modifications:
 - Currently implemented some WASI functions as dummy functions, more work is needed there.
 - The `memory` pointer is exported so it can be accessed by the WAHE host.
 - Exported variables such as `\__heap_base` or `__data_end` are currently ignored whereas they caused the original wasm2c to stop everything.
+- Exported functions keep their original name so they can be found by the host.
 - Functions have a comment added that shows its original position in the .wasm file which helps with debugging because each function can be identified using the original module's `.map` file. For example: `static void f71(void) {	// source pos b44a` which matches the `.map` file entry that reads `-     b44a       1d                 long_double_not_supported`.
 - The section skipping starts by rewinding the file pointer so that sections can be read out of order.
 
