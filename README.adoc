@@ -6,7 +6,7 @@ WAHE is the WebAssembly Host Environment, an environment that hosts modules and 
 
 This to me is the logical conclusion of watching very old video game ROMs effectively turn into universal programs that will never break while modern computer programs and plugins age about as well as a banana. Today you can create a NES ROM that would run perfectly well on an emulator that hasn't been updated since the 1990s and that will still work centuries from now because NES emulators will still run your ROM fine, so why not apply that concept in a more powerful way? And while we're at it let's also do away with the concept of programs that forces programmers to control everything directly and gives users or other programmers no opportunity to control what happens (if a program creates a window, goes full screen, tries to open a file from the A: drive, opens a dialog, you can't stop or modify that unless the program's creator goes out of his way to give you a choice).
 
-As it is this is a C library that relies on https://github.com/bytecodealliance/wasmtime[Wasmtime], although technically the dependency on Wasmtime can be disabled so that only native modules would work.
+As it is this is a C library that relies on https://github.com/bytecodealliance/wasmtime[Wasmtime], although the dependency on Wasmtime can be disabled so that only native modules would work, and using link:wasm2c[wasm2c] WebAssembly modules can be turned into native modules so that anyone can convert WebAssembly modules and run them on any platform and with better performance.
 
 = Concept
 
