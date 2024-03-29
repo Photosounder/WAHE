@@ -1,33 +1,33 @@
-char *wahe_execute_thread(wahe_thread_t *thread, const char *input_msg)
+char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 {
-	wahe_group_t *group = thread->parent_group;
+	wahe_group_t *group = chain->parent_group;
 	char *last_msg = NULL;
 
-	wahe_cur_thread = thread;
+	wahe_cur_chain = chain;
 
 	// Execute all orders
-	for (int ie=0; ie < thread->exec_order_count; ie++)
+	for (int ie=0; ie < chain->exec_order_count; ie++)
 	{
-		wahe_exec_order_t *eo = &thread->exec_order[ie];
+		wahe_exec_order_t *eo = &chain->exec_order[ie];
 		wahe_connection_t *conn = NULL;
 		int ic;
 
 		// Find the one connection to this execution order
 		if (eo->type == WAHE_EO_KB_MOUSE)				// if this EO takes no inputs we look for the outgoing connection
 		{
-			for (ic=0; ic < thread->conn_count; ic++)
-				if (thread->connection[ic].src_eo == ie)
+			for (ic=0; ic < chain->conn_count; ic++)
+				if (chain->connection[ic].src_eo == ie)
 				{
-					conn = &thread->connection[ic];
+					conn = &chain->connection[ic];
 					break;
 				}
 		}
 		else
 		{
-			for (int ic=0; ic < thread->conn_count; ic++)
-				if (thread->connection[ic].dst_eo == ie)
+			for (int ic=0; ic < chain->conn_count; ic++)
+				if (chain->connection[ic].dst_eo == ie)
 				{
-					conn = &thread->connection[ic];
+					conn = &chain->connection[ic];
 					break;
 				}
 		}
@@ -42,16 +42,16 @@ char *wahe_execute_thread(wahe_thread_t *thread, const char *input_msg)
 			if (conn)
 			{
 				// Copy message to module memory
-				switch (thread->exec_order[conn->src_eo].type)
+				switch (chain->exec_order[conn->src_eo].type)
 				{
 					case WAHE_EO_MODULE_FUNC:
-						src_module = &group->module[thread->exec_order[conn->src_eo].module_id];
-						dst_module = &group->module[thread->exec_order[conn->dst_eo].module_id];
+						src_module = &group->module[chain->exec_order[conn->src_eo].module_id];
+						dst_module = &group->module[chain->exec_order[conn->dst_eo].module_id];
 
 						call_module_free(dst_module, eo->dst_msg_addr);
 						eo->dst_msg_addr = 0;
 
-						size_t src_addr = thread->exec_order[conn->src_eo].ret_msg_addr;
+						size_t src_addr = chain->exec_order[conn->src_eo].ret_msg_addr;
 
 						if (src_addr)
 						{
@@ -62,8 +62,8 @@ char *wahe_execute_thread(wahe_thread_t *thread, const char *input_msg)
 						}
 						break;
 
-					case WAHE_EO_THREAD_INPUT_MSG:
-						dst_module = &group->module[thread->exec_order[conn->dst_eo].module_id];
+					case WAHE_EO_CHAIN_INPUT_MSG:
+						dst_module = &group->module[chain->exec_order[conn->dst_eo].module_id];
 						call_module_free(dst_module, eo->dst_msg_addr);
 						eo->dst_msg_addr = 0;
 
@@ -80,17 +80,17 @@ char *wahe_execute_thread(wahe_thread_t *thread, const char *input_msg)
 			}
 
 			// Call function
-			thread->current_eo = ie;
-			thread->current_cmd_proc_id = 0;
+			chain->current_eo = ie;
+			chain->current_cmd_proc_id = 0;
 			last_msg = call_module_func(exec_module, eo->dst_msg_addr, eo->func_id, 1);
-			thread->current_eo = -1;
+			chain->current_eo = -1;
 		}
 
 		// If the execution order is to put keyboard-mouse messages in a module's memory
 		if (eo->type == WAHE_EO_KB_MOUSE && conn)
 		{
 			#ifdef H_ROUZICLIB
-			wahe_make_keyboard_mouse_messages(thread, eo->module_id, eo->display_id, ic);
+			wahe_make_keyboard_mouse_messages(chain, eo->module_id, eo->display_id, ic);
 			#endif
 		}
 
@@ -98,10 +98,10 @@ char *wahe_execute_thread(wahe_thread_t *thread, const char *input_msg)
 		if (eo->type == WAHE_EO_IMAGE_DISPLAY && conn)
 		{
 			// Make display image from message in the source module memory
-			if (thread->exec_order[conn->src_eo].type == WAHE_EO_MODULE_FUNC)
+			if (chain->exec_order[conn->src_eo].type == WAHE_EO_MODULE_FUNC)
 			{
-				wahe_module_t *src_module = &group->module[thread->exec_order[conn->src_eo].module_id];
-				size_t src_addr = thread->exec_order[conn->src_eo].ret_msg_addr;
+				wahe_module_t *src_module = &group->module[chain->exec_order[conn->src_eo].module_id];
+				size_t src_addr = chain->exec_order[conn->src_eo].ret_msg_addr;
 
 				#ifdef H_ROUZICLIB
 				// Make raster from message

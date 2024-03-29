@@ -3,7 +3,7 @@ const char *wahe_eo_name[] =
 	"module_func",
 	"image_display",
 	"kb_mouse",
-	"thread_input_msg"
+	"chain_input_msg"
 };
 
 const char *wahe_func_name[] =
@@ -21,7 +21,7 @@ const char *wahe_func_name[] =
 };
 
 _Thread_local wahe_module_t *wahe_cur_ctx = NULL;
-_Thread_local wahe_thread_t *wahe_cur_thread = NULL;
+_Thread_local wahe_chain_t *wahe_cur_chain = NULL;
 
 void wahe_bench_point(const char *label, int depth)
 {
@@ -263,11 +263,11 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	if (!ctx->valid)
 		return 0;
 
-	wahe_thread_t *thread = wahe_cur_thread;
-	if (thread)
+	wahe_chain_t *chain = wahe_cur_chain;
+	if (chain)
 	{
-		current_module = thread->current_module;
-		thread->current_module = ctx->module_id;
+		current_module = chain->current_module;
+		chain->current_module = ctx->module_id;
 	}
 
 	// Native call
@@ -312,8 +312,8 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 		wahe_get_module_memory(ctx);
 
 		// Restore current_module
-		if (thread)
-			thread->current_module = current_module;
+		if (chain)
+			chain->current_module = current_module;
 		return ret_val;
 	}
 
@@ -335,12 +335,12 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 
 	// Call the function
 	wahe_bench_point("calling function", 1);
-	int prev_func = thread->current_func;
-	thread->current_func = func_id;
+	int prev_func = chain->current_func;
+	chain->current_func = func_id;
 	rl_mutex_lock(&ctx->mutex);
 	error = wasmtime_func_call(ctx->context, &ctx->func[func_id], param, arg_count, ret, func_id != WAHE_FUNC_FREE, &trap);
 	rl_mutex_unlock(&ctx->mutex);
-	thread->current_func = prev_func;
+	chain->current_func = prev_func;
 	wahe_bench_point("function returned", -1);
 	if (error || trap)
 	{
@@ -358,7 +358,7 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 		}
 
 	// Restore current_module
-	thread->current_module = current_module;
+	chain->current_module = current_module;
 
 	// Update memory pointer
 	wahe_get_module_memory(ctx);
@@ -404,7 +404,7 @@ char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_i
 	if (call_from_eo)
 	{
 		// Find where to store the return message address
-		wahe_exec_order_t *eo = &wahe_cur_thread->exec_order[wahe_cur_thread->current_eo];
+		wahe_exec_order_t *eo = &wahe_cur_chain->exec_order[wahe_cur_chain->current_eo];
 		ret_msg_addr = &eo->ret_msg_addr;
 	}
 
@@ -778,12 +778,12 @@ size_t wahe_load_raw_file(wahe_module_t *ctx, const char *path, size_t *size)
 }
 
 #ifdef H_ROUZICLIB
-void wahe_make_keyboard_mouse_messages(wahe_thread_t *thread, int module_id, int display_id, int conn_id)
+void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int display_id, int conn_id)
 {
 	int i;
 	buffer_t buf = {0};
 	const char *state_name[] = { "up", "", "", "", "down", "repeat" };
-	wahe_group_t *group = thread->parent_group;
+	wahe_group_t *group = chain->parent_group;
 	wahe_module_t *ctx = &group->module[module_id];
 
 	// Set textedit if framebuffer is clicked which indicates that the module is active in the interface
@@ -859,7 +859,7 @@ if (mouse.b.lmb != -1 || mouse.b.rmb != -1)
 	}
 
 	// Copy message from host memory to module memory
-	size_t *addr = &thread->exec_order[ thread->connection[conn_id].dst_eo ].dst_msg_addr;
+	size_t *addr = &chain->exec_order[ chain->connection[conn_id].dst_eo ].dst_msg_addr;
 	call_module_free(&group->module[module_id], *addr);
 	*addr = 0;
 
@@ -914,17 +914,17 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 	if (message == NULL)
 		return 0;
 
-	wahe_thread_t *thread = wahe_cur_thread;
+	wahe_chain_t *chain = wahe_cur_chain;
 	if (ctx)
 		group = ctx->parent_group;
 
 	// Execute command processors for this execution order
-	if (thread && thread->current_eo >= 0 && thread->exec_order)
+	if (chain && chain->current_eo >= 0 && chain->exec_order)
 	{
-		wahe_exec_order_t *eo = &thread->exec_order[thread->current_eo];
-		if (eo && eo->cmd_proc_id && thread->current_cmd_proc_id < eo->cmd_proc_count && eo->module_id == ctx->module_id)
+		wahe_exec_order_t *eo = &chain->exec_order[chain->current_eo];
+		if (eo && eo->cmd_proc_id && chain->current_cmd_proc_id < eo->cmd_proc_count && eo->module_id == ctx->module_id)
 		{
-			int dst_module_id = eo->cmd_proc_id[thread->current_cmd_proc_id];
+			int dst_module_id = eo->cmd_proc_id[chain->current_cmd_proc_id];
 			wahe_module_t *dst_module = &group->module[dst_module_id];
 
 			// Copy message to cmd processing module
@@ -933,15 +933,15 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			memcpy(&dst_module->memory_ptr[dst_addr], message, len);
 
 			// Call cmd processing function
-			thread->current_cmd_proc_id++;
+			chain->current_cmd_proc_id++;
 			size_t return_msg_addr_dst = (size_t) call_module_func(dst_module, dst_addr, WAHE_FUNC_PROC_CMD, 0);
-			thread->current_module = ctx->module_id;
+			chain->current_module = ctx->module_id;
 			if (return_msg_addr_dst)
 				return_msg_addr_dst -= (size_t) dst_module->memory_ptr;
 			call_module_free(dst_module, dst_addr);
 
-			if (thread->current_cmd_proc_id == eo->cmd_proc_count)
-				thread->current_cmd_proc_id = 0;
+			if (chain->current_cmd_proc_id == eo->cmd_proc_count)
+				chain->current_cmd_proc_id = 0;
 
 			// Copy and return the return message
 			if (return_msg_addr_dst)
@@ -1013,34 +1013,34 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			}
 		//**                         **
 
-		// Run thread
+		// Run chain
 		n = start = end = 0;
-		sscanf(line, "Run thread %n%*[^\n]%n\n%n", &start, &end, &n);
+		sscanf(line, "Run chain %n%*[^\n]%n\n%n", &start, &end, &n);
 		if (end)
 		{
-			wahe_thread_t *thread_to_run = NULL;
+			wahe_chain_t *chain_to_run = NULL;
 			char *name = make_string_copy_len(&line[start], end-start);
 
-			for (int i=0; i < group->thread_count; i++)
-				if (group->thread[i].thread_name && strcmp(group->thread[i].thread_name, name) == 0)
-					thread_to_run = &group->thread[i];
+			for (int i=0; i < group->chain_count; i++)
+				if (group->chain[i].chain_name && strcmp(group->chain[i].chain_name, name) == 0)
+					chain_to_run = &group->chain[i];
 
-			if (thread_to_run)
+			if (chain_to_run)
 			{
-				// Point to the thread_input_msg
+				// Point to the chain_input_msg
 				const char *input_msg = NULL;
 				if (n)
 					input_msg = &line[n];
 
-				// Execute thread and get the last message
-				char *end_msg = wahe_execute_thread(thread_to_run, input_msg);
+				// Execute chain and get the last message
+				char *end_msg = wahe_execute_chain(chain_to_run, input_msg);
 
-				// Copy the last message from the thread to give it to the caller
+				// Copy the last message from the chain to give it to the caller
 				if (end_msg)
 					return_msg_addr = module_sprintf_alloc(ctx, "%s", end_msg);
 			}
 			//else
-			//	fprintf(stderr, "The 'Run thread' command from %s:%s could not be executed because the thread named '%s' couldn't be found.\n", ctx->module_name, thread ? wahe_func_name[thread->current_func] : "(?)", name);
+			//	fprintf(stderr, "The 'Run chain' command from %s:%s could not be executed because the chain named '%s' couldn't be found.\n", ctx->module_name, chain ? wahe_func_name[chain->current_func] : "(?)", name);
 			free(name);
 
 			return return_msg_addr;
@@ -1198,10 +1198,10 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		{
 			if (get_string_linecount(&line[n+1], 0) > 1)
 				fprintf_rl(stdout, "\n=== from %s:%s ===\n%s\n    ===    ===    \n\n",
-						ctx->module_name, thread ? wahe_func_name[thread->current_func] : "(?)", &line[n+1]);
+						ctx->module_name, chain ? wahe_func_name[chain->current_func] : "(?)", &line[n+1]);
 			else
 				fprintf_rl(stdout, "(from %s:%s)   %s\n",
-						ctx->module_name, thread ? wahe_func_name[thread->current_func] : "(?)", &line[n+1]);
+						ctx->module_name, chain ? wahe_func_name[chain->current_func] : "(?)", &line[n+1]);
 			return 0;
 		}
 
@@ -1214,7 +1214,7 @@ loop_end:
 				line_len = strstr(line, "\n") - line;
 			fprintf_rl(stderr, "Command from %s:%s not interpreted: %.*s\n",
 					ctx ? ctx->module_name : "(?)", 
-					thread ? wahe_func_name[thread->current_func] : "(?)",
+					chain ? wahe_func_name[chain->current_func] : "(?)",
 					line_len, line);
 		}
 	}
@@ -1231,7 +1231,7 @@ char *wahe_run_command_native(char *message)
 wasm_trap_t *wahe_run_command(void *env, wasmtime_caller_t *caller, const wasmtime_val_t *arg, size_t arg_count, wasmtime_val_t *result, size_t result_count)
 {
 	wahe_group_t *group = env;
-	wahe_module_t *ctx = &group->module[wahe_cur_thread->current_module];
+	wahe_module_t *ctx = &group->module[wahe_cur_chain->current_module];
 	size_t return_msg_addr = 0;
 	int n;
 

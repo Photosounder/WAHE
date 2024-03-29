@@ -3,7 +3,7 @@ enum wahe_eo_type
 	WAHE_EO_MODULE_FUNC,
 	WAHE_EO_IMAGE_DISPLAY,
 	WAHE_EO_KB_MOUSE,
-	WAHE_EO_THREAD_INPUT_MSG
+	WAHE_EO_CHAIN_INPUT_MSG
 };
 
 enum wahe_func_id
@@ -104,7 +104,7 @@ typedef struct
 
 typedef struct
 {
-	char *thread_name;
+	char *chain_name;
 	void *parent_group;	// wahe_group_t *
 
 	wahe_connection_t *connection;
@@ -114,15 +114,15 @@ typedef struct
 	size_t exec_order_count, exec_order_as;
 	
 	int current_eo, current_cmd_proc_id, current_module, current_func;
-} wahe_thread_t;
+} wahe_chain_t;
 
 typedef struct
 {
 	wahe_module_t *module;
 	size_t module_count, module_as;
 
-	wahe_thread_t *thread;
-	size_t thread_count, thread_as;
+	wahe_chain_t *chain;
+	size_t chain_count, chain_as;
 
 	#ifdef H_ROUZICLIB
 	wahe_image_display_t *image;
@@ -138,7 +138,7 @@ typedef struct
 	size_t shared_buffer_count, shared_buffer_as;
 } wahe_group_t;
 
-extern _Thread_local wahe_thread_t *wahe_cur_thread;
+extern _Thread_local wahe_chain_t *wahe_cur_chain;
 
 extern int wahe_get_module_memory(wahe_module_t *ctx);
 extern void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_func_id func_id, int verbosity);
@@ -159,7 +159,7 @@ extern char *wahe_send_input(wahe_module_t *ctx, const char *format, ...);
 extern void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path);
 extern void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr);
 #ifdef H_ROUZICLIB
-extern void wahe_make_keyboard_mouse_messages(wahe_thread_t *thread, int module_id, int display_id, int conn_id);
+extern void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int display_id, int conn_id);
 #endif
 
 extern char *wahe_run_command_native(char *message);

@@ -53,22 +53,22 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 	#endif
 	char *line, **line_array = arrayise_text(load_raw_file_dos_conv(filepath, NULL), &linecount);
 	wahe_symbol_table_t symb_module={0}, symb_display={0}, symb_order={0};
-	wahe_thread_t *thread = NULL;
+	wahe_chain_t *chain = NULL;
 	int init = 0;
 
 	// Check if group needs to be initialised
-	if (group->thread_count == 0)
+	if (group->chain_count == 0)
 		init = 1;
 
 	// Get path that the .wahe file is in to access modules from there
 	char *dir_path = remove_name_from_path(NULL, filepath);
 
-	// Start by allocating or pointing to the default thread used during module initialisation
+	// Start by allocating or pointing to the default chain used during module initialisation
 	if (init)
-		alloc_enough(&group->thread, group->thread_count+=1, &group->thread_as, sizeof(wahe_thread_t), 1.5);
-	thread = &group->thread[0];
-	thread->parent_group = group;
-	wahe_cur_thread = thread;
+		alloc_enough(&group->chain, group->chain_count+=1, &group->chain_as, sizeof(wahe_chain_t), 1.5);
+	chain = &group->chain[0];
+	chain->parent_group = group;
+	wahe_cur_chain = chain;
 
 	// Initialise the shared buffer mutex
 	if (init)
@@ -166,25 +166,25 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 			}
 		}
 
-		// Thread
+		// Chain
 		memset(n, 0, sizeof(n));
-		sscanf(line, "Thread %n%*[^\n]%n", &n[0], &n[1]);
+		sscanf(line, "Chain %n%*[^\n]%n", &n[0], &n[1]);
 		if (n[1])
 		{
 			// Free EO symbol table
 			wahe_symbol_table_free(&symb_order);
 
-			// Alloc thread
-			alloc_enough(&group->thread, group->thread_count+=1, &group->thread_as, sizeof(wahe_thread_t), 1.5);
-			wahe_cur_thread = &group->thread[0];
-			thread = &group->thread[group->thread_count-1];
-			thread->thread_name = make_string_copy_len(&line[n[0]], n[1]-n[0]);
-			thread->parent_group = group;
+			// Alloc chain
+			alloc_enough(&group->chain, group->chain_count+=1, &group->chain_as, sizeof(wahe_chain_t), 1.5);
+			wahe_cur_chain = &group->chain[0];
+			chain = &group->chain[group->chain_count-1];
+			chain->chain_name = make_string_copy_len(&line[n[0]], n[1]-n[0]);
+			chain->parent_group = group;
 
-			// Add thread_input_msg EO
-			is = wahe_add_symbol_to_table(&symb_order, make_string_copy("thread_input_msg"));
-			alloc_enough(&thread->exec_order, thread->exec_order_count = is+1, &thread->exec_order_as, sizeof(wahe_exec_order_t), 1.5);
-			thread->exec_order[is].type = WAHE_EO_THREAD_INPUT_MSG;	// the type is the only thing needed since such EOs don't do anything
+			// Add chain_input_msg EO
+			is = wahe_add_symbol_to_table(&symb_order, make_string_copy("chain_input_msg"));
+			alloc_enough(&chain->exec_order, chain->exec_order_count = is+1, &chain->exec_order_as, sizeof(wahe_exec_order_t), 1.5);
+			chain->exec_order[is].type = WAHE_EO_CHAIN_INPUT_MSG;	// the type is the only thing needed since such EOs don't do anything
 		}
 
 		// Execution orders
@@ -201,7 +201,7 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 			is = wahe_add_symbol_to_table(&symb_order, order_name);
 
 			// Add execution order
-			alloc_enough(&thread->exec_order, thread->exec_order_count = is+1, &thread->exec_order_as, sizeof(wahe_exec_order_t), 1.5);
+			alloc_enough(&chain->exec_order, chain->exec_order_count = is+1, &chain->exec_order_as, sizeof(wahe_exec_order_t), 1.5);
 
 			// Go through the order's arguments
 			char *p = &line[n[2]];
@@ -218,32 +218,32 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 				// Set order type
 				if (strcmp(attribute, "type") == 0)
 				{
-					thread->exec_order[is].type = find_string_in_string_array(arg_name, wahe_eo_name, sizeof(wahe_eo_name)/sizeof(*wahe_eo_name));
-					if (thread->exec_order[is].type == -1)
+					chain->exec_order[is].type = find_string_in_string_array(arg_name, wahe_eo_name, sizeof(wahe_eo_name)/sizeof(*wahe_eo_name));
+					if (chain->exec_order[is].type == -1)
 						bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Order type attribute \"%s\" not previously defined.\n", filepath, il, arg_name);
 				}
 
 				// Set module
 				if (strcmp(attribute, "module") == 0)
 				{
-					thread->exec_order[is].module_id = wahe_find_symbol_in_table(&symb_module, arg_name) + module_offset;
-					if (thread->exec_order[is].module_id == -1)
+					chain->exec_order[is].module_id = wahe_find_symbol_in_table(&symb_module, arg_name) + module_offset;
+					if (chain->exec_order[is].module_id == -1)
 						bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Order module attribute \"%s\" not previously defined.\n", filepath, il, arg_name);
 				}
 
 				// Set module function to call
 				if (strcmp(attribute, "func") == 0)
 				{
-					thread->exec_order[is].func_id = find_string_in_string_array(arg_name, wahe_func_name, sizeof(wahe_func_name)/sizeof(*wahe_func_name));
-					if (thread->exec_order[is].func_id == -1)
+					chain->exec_order[is].func_id = find_string_in_string_array(arg_name, wahe_func_name, sizeof(wahe_func_name)/sizeof(*wahe_func_name));
+					if (chain->exec_order[is].func_id == -1)
 						bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Order function attribute \"%s\" not previously defined.\n", filepath, il, arg_name);
 				}
 
 				// Set image display
 				if (strcmp(attribute, "display") == 0)
 				{
-					thread->exec_order[is].display_id = wahe_find_symbol_in_table(&symb_display, arg_name);
-					if (thread->exec_order[is].display_id == -1)
+					chain->exec_order[is].display_id = wahe_find_symbol_in_table(&symb_display, arg_name);
+					if (chain->exec_order[is].display_id == -1)
 						bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Order display attribute \"%s\" not previously defined.\n", filepath, il, arg_name);
 				}
 
@@ -260,22 +260,22 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 		sscanf(line, "Connection %n%*s%n - %n%*s%n", &n[0], &n[1], &n[2], &n[3]);
 		if (n[3])
 		{
-			is = thread->conn_count;
+			is = chain->conn_count;
 
 			// Add connection
-			alloc_enough(&thread->connection, thread->conn_count+=1, &thread->conn_as, sizeof(wahe_connection_t), 1.5);
+			alloc_enough(&chain->connection, chain->conn_count+=1, &chain->conn_as, sizeof(wahe_connection_t), 1.5);
 
 			char *src_name = make_string_copy_len(&line[n[0]], n[1]-n[0]);
 			char *dst_name = make_string_copy_len(&line[n[2]], n[3]-n[2]);
 
 			// Set source and destination execution orders
-			thread->connection[is].src_eo = wahe_find_symbol_in_table(&symb_order, src_name);
-			thread->connection[is].dst_eo = wahe_find_symbol_in_table(&symb_order, dst_name);
+			chain->connection[is].src_eo = wahe_find_symbol_in_table(&symb_order, src_name);
+			chain->connection[is].dst_eo = wahe_find_symbol_in_table(&symb_order, dst_name);
 
-			if (thread->connection[is].src_eo == -1)
+			if (chain->connection[is].src_eo == -1)
 				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Connection source order \"%s\" not previously defined.\n", filepath, il, src_name);
 
-			if (thread->connection[is].dst_eo == -1)
+			if (chain->connection[is].dst_eo == -1)
 				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Connection destination order \"%s\" not previously defined.\n", filepath, il, dst_name);
 
 			free_null(&src_name);
@@ -297,7 +297,7 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 				goto end;
 			}
 			free(order_name);
-			wahe_exec_order_t *eo = &thread->exec_order[ie];
+			wahe_exec_order_t *eo = &chain->exec_order[ie];
 
 			// Add exec order command processor
 			int ip = eo->cmd_proc_count;

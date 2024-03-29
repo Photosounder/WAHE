@@ -73,6 +73,56 @@ static void renderExpr(FILE *out, struct InputStream *in) {
     }
 }
 
+//+ WAHE edit
+void load_map_file(const char *path)
+{
+	int n, il, linecount;
+	char **array = arrayise_text(load_raw_file_dos_conv(path, NULL), &linecount);
+
+	for (int il=0; il < linecount; il++)
+	{
+		// Parse memory ranges
+		char name[61], obj_file[1001];
+		int64_t range_addr0, range_size0, range_addr1, range_size1;
+
+		name[0] = '\0';
+		obj_file[0] = '\0';
+
+		// Parse the address, size and object file and add to the range array
+		if (sscanf(array[il], "%*s %" SCNx64 " %" SCNx64 " %1000[^\n]",
+					&range_addr0, &range_size0, obj_file) == 3)
+		{
+			if (range_addr0 == 0)
+				continue;
+
+			// Add range
+			mem_range_add(range_addr0, range_size0, obj_file, "");
+
+			// Replace that range with a two-line range if present
+			if (il+1 < linecount)
+				if (sscanf(array[il+1], "%*s %" SCNx64 " %" SCNx64 " %60[^\n]",
+							&range_addr1, &range_size1, name) == 3)
+					if (range_addr0 == range_addr1 && range_size0 == range_size1)
+					{
+						il++;
+
+						// Delete ':' and after
+						p = strstr(obj_file, ":(");
+						if (p)
+							*p = '\0';
+
+						// Start at file name
+						const char *pc = get_filename_from_path(obj_file);
+						if (pc == NULL)
+							pc = obj_file;
+
+						mem_range_add(range_addr0, range_size0, name, pc);
+					}
+		}
+	}
+}
+//- WAHE edit
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s in.wasm.zst out.c\n", argv[0]);
