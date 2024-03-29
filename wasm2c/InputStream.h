@@ -146,13 +146,15 @@ static void InputStream_skipBytes(struct InputStream *self, size_t len) {
 }
 
 static uint32_t InputStream_skipToSection(struct InputStream *self, uint8_t expected_id) {
-    rewind(self->stream);		// WAHE edit
-    InputStream_skipBytes(self, 8);	// WAHE edit, skip first 8 bytes
+    fseek(self->stream, 0, SEEK_END);		// WAHE edit
+    long int file_size = ftell(self->stream);	// WAHE edit
+    fseek(self->stream, 8, SEEK_SET);		// WAHE edit, return to byte 8
     while (true) {
         uint8_t id = InputStream_readByte(self);
         uint32_t size = InputStream_readLeb128_u32(self);
         if (id == expected_id) return size;
         InputStream_skipBytes(self, size);
+	if (ftell(self->stream) == file_size)	return 0;	// WAHE edit
     }
 }
 

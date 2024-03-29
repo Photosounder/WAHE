@@ -6,6 +6,7 @@
 
 static void panic(const char *reason) {
     fprintf(stderr, "%s\n", reason);
+    __builtin_debugtrap();	// WAHE edit
     abort();
 }
 

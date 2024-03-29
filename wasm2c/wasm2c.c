@@ -74,7 +74,7 @@ static void renderExpr(FILE *out, struct InputStream *in) {
 }
 
 //+ WAHE edit
-void load_map_file(const char *path)
+/*void load_map_file(const char *path)
 {
 	int n, il, linecount;
 	char **array = arrayise_text(load_raw_file_dos_conv(path, NULL), &linecount);
@@ -120,7 +120,7 @@ void load_map_file(const char *path)
 					}
 		}
 	}
-}
+}*/
 //- WAHE edit
 
 int main(int argc, char **argv) {
@@ -585,7 +585,7 @@ int main(int argc, char **argv) {
         fputc('\n', out);
     }
 
-    (void)InputStream_skipToSection(&in, WasmSectionId_elem);
+    if (InputStream_skipToSection(&in, WasmSectionId_elem))	// WAHE edit
     {
         uint32_t len = InputStream_readLeb128_u32(&in);
         fputs("static void init_elem(void) {\n", out);
