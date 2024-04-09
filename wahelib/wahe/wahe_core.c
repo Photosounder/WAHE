@@ -346,6 +346,7 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	{
 		fprintf_rl(stderr, "Calling %s:%s() failed\n", ctx->module_name, wahe_func_name[func_id]);
 		fprint_wasmtime_error(error, trap);
+		ctx->valid = 0;
 		return 0;
 	}
 
