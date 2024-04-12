@@ -587,8 +587,6 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		ctx->stack = wasmbin_read_stack_pointer((FILE *) &wasm_buf);
 		wasmbin_read_memory_size((FILE *) &wasm_buf, &ctx->page_count_initial, &ctx->page_count_max);
 		io_override_set_FILE();
-		fprintf_rl(stdout, "Stack %#zx, heap base %#zx, data end %#zx\n", ctx->stack, ctx->heap_base, ctx->data_end);
-		fprintf_rl(stdout, "Initial memory %zu kB, max memory %zu kB\n", ctx->page_count_initial*64ULL, ctx->page_count_max*64ULL);
 
 		wasmtime_error_t *error;
 		wasm_functype_t *func_type;
@@ -662,6 +660,10 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 
 		// Set the type of module addresses (currently always 32-bit)
 		ctx->address_type = WASMTIME_I32;
+
+		// Print details
+		fprintf_rl(stdout, "Stack %#zx, heap base %#zx, data end %#zx\n", ctx->stack, ctx->heap_base, ctx->data_end);
+		fprintf_rl(stdout, "Initial memory %zu kB, max memory %zu kB\n", ctx->page_count_initial*64ULL, ctx->page_count_max*64ULL);
 
 		#else
 		ctx->valid = 0;
