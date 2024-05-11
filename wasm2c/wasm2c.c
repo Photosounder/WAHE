@@ -74,6 +74,286 @@ static void renderExpr(FILE *out, struct InputStream *in) {
 }
 
 //+ WAHE edit
+const char *simd_func_name(int op)
+{
+	switch (op)
+	{
+		case WasmSimdOpcode_v128_load8x8_s: return "simd_v128_load8x8_s";
+		case WasmSimdOpcode_v128_load8x8_u: return "simd_v128_load8x8_u";
+		case WasmSimdOpcode_v128_load16x4_s: return "simd_v128_load16x4_s";
+		case WasmSimdOpcode_v128_load16x4_u: return "simd_v128_load16x4_u";
+		case WasmSimdOpcode_v128_load32x2_s: return "simd_v128_load32x2_s";
+		case WasmSimdOpcode_v128_load32x2_u: return "simd_v128_load32x2_u";
+		case WasmSimdOpcode_v128_load8_splat: return "simd_v128_load8_splat";
+		case WasmSimdOpcode_v128_load16_splat: return "simd_v128_load16_splat";
+		case WasmSimdOpcode_v128_load32_splat: return "simd_v128_load32_splat";
+		case WasmSimdOpcode_v128_load64_splat: return "simd_v128_load64_splat";
+		case WasmSimdOpcode_i8x16_shuffle: return "simd_i8x16_shuffle";
+		case WasmSimdOpcode_i8x16_swizzle: return "simd_i8x16_swizzle";
+		case WasmSimdOpcode_i8x16_splat: return "simd_i8x16_splat";
+
+		case WasmSimdOpcode_i16x8_splat: return "simd_i16x8_splat";
+		case WasmSimdOpcode_i32x4_splat: return "simd_i32x4_splat";
+		case WasmSimdOpcode_i64x2_splat: return "simd_i64x2_splat";
+		case WasmSimdOpcode_f32x4_splat: return "simd_f32x4_splat";
+		case WasmSimdOpcode_f64x2_splat: return "simd_f64x2_splat";
+		case WasmSimdOpcode_i8x16_extract_lane_s: return "simd_i8x16_extract_lane_s";
+		case WasmSimdOpcode_i8x16_extract_lane_u: return "simd_i8x16_extract_lane_u";
+		case WasmSimdOpcode_i8x16_replace_lane: return "simd_i8x16_replace_lane";
+		case WasmSimdOpcode_i16x8_extract_lane_s: return "simd_i16x8_extract_lane_s";
+		case WasmSimdOpcode_i16x8_extract_lane_u: return "simd_i16x8_extract_lane_u";
+		case WasmSimdOpcode_i16x8_replace_lane: return "simd_i16x8_replace_lane";
+		case WasmSimdOpcode_i32x4_extract_lane: return "simd_i32x4_extract_lane";
+		case WasmSimdOpcode_i32x4_replace_lane: return "simd_i32x4_replace_lane";
+		case WasmSimdOpcode_i64x2_extract_lane: return "simd_i64x2_extract_lane";
+		case WasmSimdOpcode_i64x2_replace_lane: return "simd_i64x2_replace_lane";
+		case WasmSimdOpcode_f32x4_extract_lane: return "simd_f32x4_extract_lane";
+
+		case WasmSimdOpcode_f32x4_replace_lane: return "simd_f32x4_replace_lane";
+		case WasmSimdOpcode_f64x2_extract_lane: return "simd_f64x2_extract_lane";
+		case WasmSimdOpcode_f64x2_replace_lane: return "simd_f64x2_replace_lane";
+		case WasmSimdOpcode_i8x16_eq: return "simd_i8x16_eq";
+		case WasmSimdOpcode_i8x16_ne: return "simd_i8x16_ne";
+		case WasmSimdOpcode_i8x16_lt_s: return "simd_i8x16_lt_s";
+		case WasmSimdOpcode_i8x16_lt_u: return "simd_i8x16_lt_u";
+		case WasmSimdOpcode_i8x16_gt_s: return "simd_i8x16_gt_s";
+		case WasmSimdOpcode_i8x16_gt_u: return "simd_i8x16_gt_u";
+		case WasmSimdOpcode_i8x16_le_s: return "simd_i8x16_le_s";
+		case WasmSimdOpcode_i8x16_le_u: return "simd_i8x16_le_u";
+		case WasmSimdOpcode_i8x16_ge_s: return "simd_i8x16_ge_s";
+		case WasmSimdOpcode_i8x16_ge_u: return "simd_i8x16_ge_u";
+		case WasmSimdOpcode_i16x8_eq: return "simd_i16x8_eq";
+		case WasmSimdOpcode_i16x8_ne: return "simd_i16x8_ne";
+		case WasmSimdOpcode_i16x8_lt_s: return "simd_i16x8_lt_s";
+
+		case WasmSimdOpcode_i16x8_lt_u: return "simd_i16x8_lt_u";
+		case WasmSimdOpcode_i16x8_gt_s: return "simd_i16x8_gt_s";
+		case WasmSimdOpcode_i16x8_gt_u: return "simd_i16x8_gt_u";
+		case WasmSimdOpcode_i16x8_le_s: return "simd_i16x8_le_s";
+		case WasmSimdOpcode_i16x8_le_u: return "simd_i16x8_le_u";
+		case WasmSimdOpcode_i16x8_ge_s: return "simd_i16x8_ge_s";
+		case WasmSimdOpcode_i16x8_ge_u: return "simd_i16x8_ge_u";
+		case WasmSimdOpcode_i32x4_eq: return "simd_i32x4_eq";
+		case WasmSimdOpcode_i32x4_ne: return "simd_i32x4_ne";
+		case WasmSimdOpcode_i32x4_lt_s: return "simd_i32x4_lt_s";
+		case WasmSimdOpcode_i32x4_lt_u: return "simd_i32x4_lt_u";
+		case WasmSimdOpcode_i32x4_gt_s: return "simd_i32x4_gt_s";
+		case WasmSimdOpcode_i32x4_gt_u: return "simd_i32x4_gt_u";
+		case WasmSimdOpcode_i32x4_le_s: return "simd_i32x4_le_s";
+		case WasmSimdOpcode_i32x4_le_u: return "simd_i32x4_le_u";
+		case WasmSimdOpcode_i32x4_ge_s: return "simd_i32x4_ge_s";
+
+		case WasmSimdOpcode_i32x4_ge_u: return "simd_i32x4_ge_u";
+		case WasmSimdOpcode_f32x4_eq: return "simd_f32x4_eq";
+		case WasmSimdOpcode_f32x4_ne: return "simd_f32x4_ne";
+		case WasmSimdOpcode_f32x4_lt: return "simd_f32x4_lt";
+		case WasmSimdOpcode_f32x4_gt: return "simd_f32x4_gt";
+		case WasmSimdOpcode_f32x4_le: return "simd_f32x4_le";
+		case WasmSimdOpcode_f32x4_ge: return "simd_f32x4_ge";
+		case WasmSimdOpcode_f64x2_eq: return "simd_f64x2_eq";
+		case WasmSimdOpcode_f64x2_ne: return "simd_f64x2_ne";
+		case WasmSimdOpcode_f64x2_lt: return "simd_f64x2_lt";
+		case WasmSimdOpcode_f64x2_gt: return "simd_f64x2_gt";
+		case WasmSimdOpcode_f64x2_le: return "simd_f64x2_le";
+		case WasmSimdOpcode_f64x2_ge: return "simd_f64x2_ge";
+		case WasmSimdOpcode_v128_not: return "simd_v128_not";
+		case WasmSimdOpcode_v128_and: return "simd_v128_and";
+		case WasmSimdOpcode_v128_andnot: return "simd_v128_andnot";
+
+		case WasmSimdOpcode_v128_or: return "simd_v128_or";
+		case WasmSimdOpcode_v128_xor: return "simd_v128_xor";
+		case WasmSimdOpcode_v128_bitselect: return "simd_v128_bitselect";
+		case WasmSimdOpcode_v128_any_true: return "simd_v128_any_true";
+		case WasmSimdOpcode_v128_load8_lane: return "simd_v128_load8_lane";
+		case WasmSimdOpcode_v128_load16_lane: return "simd_v128_load16_lane";
+		case WasmSimdOpcode_v128_load32_lane: return "simd_v128_load32_lane";
+		case WasmSimdOpcode_v128_load64_lane: return "simd_v128_load64_lane";
+		case WasmSimdOpcode_v128_store8_lane: return "simd_v128_store8_lane";
+		case WasmSimdOpcode_v128_store16_lane: return "simd_v128_store16_lane";
+		case WasmSimdOpcode_v128_store32_lane: return "simd_v128_store32_lane";
+		case WasmSimdOpcode_v128_store64_lane: return "simd_v128_store64_lane";
+		case WasmSimdOpcode_v128_load32_zero: return "simd_v128_load32_zero";
+		case WasmSimdOpcode_v128_load64_zero: return "simd_v128_load64_zero";
+		case WasmSimdOpcode_f32x4_demote_f64x2_zero: return "simd_f32x4_demote_f64x2_zero";
+		case WasmSimdOpcode_f64x2_promote_low_f32x4: return "simd_f64x2_promote_low_f32x4";
+
+		case WasmSimdOpcode_i8x16_abs: return "simd_i8x16_abs";
+		case WasmSimdOpcode_i8x16_neg: return "simd_i8x16_neg";
+		case WasmSimdOpcode_i8x16_popcnt: return "simd_i8x16_popcnt";
+		case WasmSimdOpcode_i8x16_all_true: return "simd_i8x16_all_true";
+		case WasmSimdOpcode_i8x16_bitmask: return "simd_i8x16_bitmask";
+		case WasmSimdOpcode_i8x16_narrow_i16x8_s: return "simd_i8x16_narrow_i16x8_s";
+		case WasmSimdOpcode_i8x16_narrow_i16x8_u: return "simd_i8x16_narrow_i16x8_u";
+		case WasmSimdOpcode_f32x4_ceil: return "simd_f32x4_ceil";
+		case WasmSimdOpcode_f32x4_floor: return "simd_f32x4_floor";
+		case WasmSimdOpcode_f32x4_trunc: return "simd_f32x4_trunc";
+		case WasmSimdOpcode_f32x4_nearest: return "simd_f32x4_nearest";
+		case WasmSimdOpcode_i8x16_shl: return "simd_i8x16_shl";
+		case WasmSimdOpcode_i8x16_shr_s: return "simd_i8x16_shr_s";
+		case WasmSimdOpcode_i8x16_shr_u: return "simd_i8x16_shr_u";
+		case WasmSimdOpcode_i8x16_add: return "simd_i8x16_add";
+		case WasmSimdOpcode_i8x16_add_sat_s: return "simd_i8x16_add_sat_s";
+
+		case WasmSimdOpcode_i8x16_add_sat_u: return "simd_i8x16_add_sat_u";
+		case WasmSimdOpcode_i8x16_sub: return "simd_i8x16_sub";
+		case WasmSimdOpcode_i8x16_sub_sat_s: return "simd_i8x16_sub_sat_s";
+		case WasmSimdOpcode_i8x16_sub_sat_u: return "simd_i8x16_sub_sat_u";
+		case WasmSimdOpcode_f64x2_ceil: return "simd_f64x2_ceil";
+		case WasmSimdOpcode_f64x2_floor: return "simd_f64x2_floor";
+		case WasmSimdOpcode_i8x16_min_s: return "simd_i8x16_min_s";
+		case WasmSimdOpcode_i8x16_min_u: return "simd_i8x16_min_u";
+		case WasmSimdOpcode_i8x16_max_s: return "simd_i8x16_max_s";
+		case WasmSimdOpcode_i8x16_max_u: return "simd_i8x16_max_u";
+		case WasmSimdOpcode_f64x2_trunc: return "simd_f64x2_trunc";
+		case WasmSimdOpcode_i8x16_avgr_u: return "simd_i8x16_avgr_u";
+		case WasmSimdOpcode_i16x8_extadd_pairwise_i8x16_s: return "simd_i16x8_extadd_pairwise_i8x16_s";
+		case WasmSimdOpcode_i16x8_extadd_pairwise_i8x16_u: return "simd_i16x8_extadd_pairwise_i8x16_u";
+		case WasmSimdOpcode_i32x4_extadd_pairwise_i16x8_s: return "simd_i32x4_extadd_pairwise_i16x8_s";
+		case WasmSimdOpcode_i32x4_extadd_pairwise_i16x8_u: return "simd_i32x4_extadd_pairwise_i16x8_u";
+
+		case WasmSimdOpcode_i16x8_abs: return "simd_i16x8_abs";
+		case WasmSimdOpcode_i16x8_neg: return "simd_i16x8_neg";
+		case WasmSimdOpcode_i16x8_q15mulr_sat_s: return "simd_i16x8_q15mulr_sat_s";
+		case WasmSimdOpcode_i16x8_all_true: return "simd_i16x8_all_true";
+		case WasmSimdOpcode_i16x8_bitmask: return "simd_i16x8_bitmask";
+		case WasmSimdOpcode_i16x8_narrow_i32x4_s: return "simd_i16x8_narrow_i32x4_s";
+		case WasmSimdOpcode_i16x8_narrow_i32x4_u: return "simd_i16x8_narrow_i32x4_u";
+		case WasmSimdOpcode_i16x8_extend_low_i8x16_s: return "simd_i16x8_extend_low_i8x16_s";
+		case WasmSimdOpcode_i16x8_extend_high_i8x16_s: return "simd_i16x8_extend_high_i8x16_s";
+		case WasmSimdOpcode_i16x8_extend_low_i8x16_u: return "simd_i16x8_extend_low_i8x16_u";
+		case WasmSimdOpcode_i16x8_extend_high_i8x16_u: return "simd_i16x8_extend_high_i8x16_u";
+		case WasmSimdOpcode_i16x8_shl: return "simd_i16x8_shl";
+		case WasmSimdOpcode_i16x8_shr_s: return "simd_i16x8_shr_s";
+		case WasmSimdOpcode_i16x8_shr_u: return "simd_i16x8_shr_u";
+		case WasmSimdOpcode_i16x8_add: return "simd_i16x8_add";
+		case WasmSimdOpcode_i16x8_add_sat_s: return "simd_i16x8_add_sat_s";
+
+		case WasmSimdOpcode_i16x8_add_sat_u: return "simd_i16x8_add_sat_u";
+		case WasmSimdOpcode_i16x8_sub: return "simd_i16x8_sub";
+		case WasmSimdOpcode_i16x8_sub_sat_s: return "simd_i16x8_sub_sat_s";
+		case WasmSimdOpcode_i16x8_sub_sat_u: return "simd_i16x8_sub_sat_u";
+		case WasmSimdOpcode_f64x2_nearest: return "simd_f64x2_nearest";
+		case WasmSimdOpcode_i16x8_mul: return "simd_i16x8_mul";
+		case WasmSimdOpcode_i16x8_min_s: return "simd_i16x8_min_s";
+		case WasmSimdOpcode_i16x8_min_u: return "simd_i16x8_min_u";
+		case WasmSimdOpcode_i16x8_max_s: return "simd_i16x8_max_s";
+		case WasmSimdOpcode_i16x8_max_u: return "simd_i16x8_max_u";
+		case WasmSimdOpcode_i16x8_avgr_u: return "simd_i16x8_avgr_u";
+		case WasmSimdOpcode_i16x8_extmul_low_i8x16_s: return "simd_i16x8_extmul_low_i8x16_s";
+		case WasmSimdOpcode_i16x8_extmul_high_i8x16_s: return "simd_i16x8_extmul_high_i8x16_s";
+		case WasmSimdOpcode_i16x8_extmul_low_i8x16_u: return "simd_i16x8_extmul_low_i8x16_u";
+		case WasmSimdOpcode_i16x8_extmul_high_i8x16_u: return "simd_i16x8_extmul_high_i8x16_u";
+
+		case WasmSimdOpcode_i32x4_abs: return "simd_i32x4_abs";
+		case WasmSimdOpcode_i32x4_neg: return "simd_i32x4_neg";
+		case WasmSimdOpcode_i32x4_all_true: return "simd_i32x4_all_true";
+		case WasmSimdOpcode_i32x4_bitmask: return "simd_i32x4_bitmask";
+		case WasmSimdOpcode_i32x4_extend_low_i16x8_s: return "simd_i32x4_extend_low_i16x8_s";
+		case WasmSimdOpcode_i32x4_extend_high_i16x8_s: return "simd_i32x4_extend_high_i16x8_s";
+		case WasmSimdOpcode_i32x4_extend_low_i16x8_u: return "simd_i32x4_extend_low_i16x8_u";
+		case WasmSimdOpcode_i32x4_extend_high_i16x8_u: return "simd_i32x4_extend_high_i16x8_u";
+		case WasmSimdOpcode_i32x4_shl: return "simd_i32x4_shl";
+		case WasmSimdOpcode_i32x4_shr_s: return "simd_i32x4_shr_s";
+		case WasmSimdOpcode_i32x4_shr_u: return "simd_i32x4_shr_u";
+		case WasmSimdOpcode_i32x4_add: return "simd_i32x4_add";
+
+		case WasmSimdOpcode_i32x4_sub: return "simd_i32x4_sub";
+		case WasmSimdOpcode_i32x4_mul: return "simd_i32x4_mul";
+		case WasmSimdOpcode_i32x4_min_s: return "simd_i32x4_min_s";
+		case WasmSimdOpcode_i32x4_min_u: return "simd_i32x4_min_u";
+		case WasmSimdOpcode_i32x4_max_s: return "simd_i32x4_max_s";
+		case WasmSimdOpcode_i32x4_max_u: return "simd_i32x4_max_u";
+		case WasmSimdOpcode_i32x4_dot_i16x8_s: return "simd_i32x4_dot_i16x8_s";
+		case WasmSimdOpcode_i32x4_extmul_low_i16x8_s: return "simd_i32x4_extmul_low_i16x8_s";
+		case WasmSimdOpcode_i32x4_extmul_high_i16x8_s: return "simd_i32x4_extmul_high_i16x8_s";
+		case WasmSimdOpcode_i32x4_extmul_low_i16x8_u: return "simd_i32x4_extmul_low_i16x8_u";
+		case WasmSimdOpcode_i32x4_extmul_high_i16x8_u: return "simd_i32x4_extmul_high_i16x8_u";
+
+		case WasmSimdOpcode_i64x2_abs: return "simd_i64x2_abs";
+		case WasmSimdOpcode_i64x2_neg: return "simd_i64x2_neg";
+		case WasmSimdOpcode_i64x2_all_true: return "simd_i64x2_all_true";
+		case WasmSimdOpcode_i64x2_bitmask: return "simd_i64x2_bitmask";
+		case WasmSimdOpcode_i64x2_extend_low_i32x4_s: return "simd_i64x2_extend_low_i32x4_s";
+		case WasmSimdOpcode_i64x2_extend_high_i32x4_s: return "simd_i64x2_extend_high_i32x4_s";
+		case WasmSimdOpcode_i64x2_extend_low_i32x4_u: return "simd_i64x2_extend_low_i32x4_u";
+		case WasmSimdOpcode_i64x2_extend_high_i32x4_u: return "simd_i64x2_extend_high_i32x4_u";
+		case WasmSimdOpcode_i64x2_shl: return "simd_i64x2_shl";
+		case WasmSimdOpcode_i64x2_shr_s: return "simd_i64x2_shr_s";
+		case WasmSimdOpcode_i64x2_shr_u: return "simd_i64x2_shr_u";
+		case WasmSimdOpcode_i64x2_add: return "simd_i64x2_add";
+
+		case WasmSimdOpcode_i64x2_sub: return "simd_i64x2_sub";
+		case WasmSimdOpcode_i64x2_mul: return "simd_i64x2_mul";
+		case WasmSimdOpcode_i64x2_eq: return "simd_i64x2_eq";
+		case WasmSimdOpcode_i64x2_ne: return "simd_i64x2_ne";
+		case WasmSimdOpcode_i64x2_lt_s: return "simd_i64x2_lt_s";
+		case WasmSimdOpcode_i64x2_gt_s: return "simd_i64x2_gt_s";
+		case WasmSimdOpcode_i64x2_le_s: return "simd_i64x2_le_s";
+		case WasmSimdOpcode_i64x2_ge_s: return "simd_i64x2_ge_s";
+		case WasmSimdOpcode_i64x2_extmul_low_i32x4_s: return "simd_i64x2_extmul_low_i32x4_s";
+		case WasmSimdOpcode_i64x2_extmul_high_i32x4_s: return "simd_i64x2_extmul_high_i32x4_s";
+		case WasmSimdOpcode_i64x2_extmul_low_i32x4_u: return "simd_i64x2_extmul_low_i32x4_u";
+		case WasmSimdOpcode_i64x2_extmul_high_i32x4_u: return "simd_i64x2_extmul_high_i32x4_u";
+
+		case WasmSimdOpcode_f32x4_abs: return "simd_f32x4_abs";
+		case WasmSimdOpcode_f32x4_neg: return "simd_f32x4_neg";
+		case WasmSimdOpcode_f32x4_sqrt: return "simd_f32x4_sqrt";
+		case WasmSimdOpcode_f32x4_add: return "simd_f32x4_add";
+		case WasmSimdOpcode_f32x4_sub: return "simd_f32x4_sub";
+		case WasmSimdOpcode_f32x4_mul: return "simd_f32x4_mul";
+		case WasmSimdOpcode_f32x4_div: return "simd_f32x4_div";
+		case WasmSimdOpcode_f32x4_min: return "simd_f32x4_min";
+		case WasmSimdOpcode_f32x4_max: return "simd_f32x4_max";
+		case WasmSimdOpcode_f32x4_pmin: return "simd_f32x4_pmin";
+		case WasmSimdOpcode_f32x4_pmax: return "simd_f32x4_pmax";
+		case WasmSimdOpcode_f64x2_abs: return "simd_f64x2_abs";
+		case WasmSimdOpcode_f64x2_neg: return "simd_f64x2_neg";
+		case WasmSimdOpcode_f64x2_sqrt: return "simd_f64x2_sqrt";
+
+		case WasmSimdOpcode_f64x2_add: return "simd_f64x2_add";
+		case WasmSimdOpcode_f64x2_sub: return "simd_f64x2_sub";
+		case WasmSimdOpcode_f64x2_mul: return "simd_f64x2_mul";
+		case WasmSimdOpcode_f64x2_div: return "simd_f64x2_div";
+		case WasmSimdOpcode_f64x2_min: return "simd_f64x2_min";
+		case WasmSimdOpcode_f64x2_max: return "simd_f64x2_max";
+		case WasmSimdOpcode_f64x2_pmin: return "simd_f64x2_pmin";
+		case WasmSimdOpcode_f64x2_pmax: return "simd_f64x2_pmax";
+		case WasmSimdOpcode_i32x4_trunc_sat_f32x4_s: return "simd_i32x4_trunc_sat_f32x4_s";
+		case WasmSimdOpcode_i32x4_trunc_sat_f32x4_u: return "simd_i32x4_trunc_sat_f32x4_u";
+		case WasmSimdOpcode_f32x4_convert_i32x4_s: return "simd_f32x4_convert_i32x4_s";
+		case WasmSimdOpcode_f32x4_convert_i32x4_u: return "simd_f32x4_convert_i32x4_u";
+		case WasmSimdOpcode_i32x4_trunc_sat_f64x2_s_zero: return "simd_i32x4_trunc_sat_f64x2_s_zero";
+		case WasmSimdOpcode_i32x4_trunc_sat_f64x2_u_zero: return "simd_i32x4_trunc_sat_f64x2_u_zero";
+		case WasmSimdOpcode_f64x2_convert_low_i32x4_s: return "simd_f64x2_convert_low_i32x4_s";
+		case WasmSimdOpcode_f64x2_convert_low_i32x4_u: return "simd_f64x2_convert_low_i32x4_u";
+
+		case WasmSimdOpcode_i8x16_relaxed_swizzle: return "simd_i8x16_relaxed_swizzle";
+		case WasmSimdOpcode_i32x4_relaxed_trunc_f32x4_s: return "simd_i32x4_relaxed_trunc_f32x4_s";
+		case WasmSimdOpcode_i32x4_relaxed_trunc_f32x4_u: return "simd_i32x4_relaxed_trunc_f32x4_u";
+		case WasmSimdOpcode_i32x4_relaxed_trunc_f64x2_s_zero: return "simd_i32x4_relaxed_trunc_f64x2_s_zero";
+		case WasmSimdOpcode_i32x4_relaxed_trunc_f64x2_u_zero: return "simd_i32x4_relaxed_trunc_f64x2_u_zero";
+		case WasmSimdOpcode_f32x4_relaxed_madd: return "simd_f32x4_relaxed_madd";
+		case WasmSimdOpcode_f32x4_relaxed_nmadd: return "simd_f32x4_relaxed_nmadd";
+		case WasmSimdOpcode_f64x2_relaxed_madd: return "simd_f64x2_relaxed_madd";
+		case WasmSimdOpcode_f64x2_relaxed_nmadd: return "simd_f64x2_relaxed_nmadd";
+		case WasmSimdOpcode_i8x16_relaxed_laneselect: return "simd_i8x16_relaxed_laneselect";
+		case WasmSimdOpcode_i16x8_relaxed_laneselect: return "simd_i16x8_relaxed_laneselect";
+		case WasmSimdOpcode_i32x4_relaxed_laneselect: return "simd_i32x4_relaxed_laneselect";
+		case WasmSimdOpcode_i64x2_relaxed_laneselect: return "simd_i64x2_relaxed_laneselect";
+		case WasmSimdOpcode_f32x4_relaxed_min: return "simd_f32x4_relaxed_min";
+		case WasmSimdOpcode_f32x4_relaxed_max: return "simd_f32x4_relaxed_max";
+		case WasmSimdOpcode_f64x2_relaxed_min: return "simd_f64x2_relaxed_min";
+
+		case WasmSimdOpcode_f64x2_relaxed_max: return "simd_f64x2_relaxed_max";
+		case WasmSimdOpcode_i16x8_relaxed_q15mulr_s: return "simd_i16x8_relaxed_q15mulr_s";
+		case WasmSimdOpcode_i16x8_relaxed_dot_i8x16_i7x16_s: return "simd_i16x8_relaxed_dot_i8x16_i7x16_s";
+		case WasmSimdOpcode_i32x4_relaxed_dot_i8x16_i7x16_add_s: return "simd_i32x4_relaxed_dot_i8x16_i7x16_add_s";
+		case WasmSimdOpcode_f32x4_relaxed_dot_bf16x8_add_f32x4: return "simd_f32x4_relaxed_dot_bf16x8_add_f32x4";
+	}
+	fprintf(stderr, "simd_func_name(0x%x) unnamed\n", op);
+	return "simd_unknown";
+}
+
 /*void load_map_file(const char *path)
 {
 	int n, il, linecount;
@@ -156,7 +436,8 @@ int main(int argc, char **argv) {
           "#include <stdint.h>\n"
           "#include <stdlib.h>\n"
           "#include <string.h>\n"
-          "#include <stdio.h>\n"        // WAHE edit
+          "#include <stdio.h>\n"        		// WAHE edit
+          "#include \"wasm_simd_replacement.h\"\n"	// WAHE edit
           "\n"
           "static uint16_t i16_byteswap(uint16_t src) {\n"
           "    return (uint16_t)(uint8_t)(src >> 0) << 8 |\n"
@@ -620,7 +901,7 @@ int main(int argc, char **argv) {
         for (uint32_t func_i = 0; func_i < len; func_i += 1) {
             FuncGen_reset(&fg);
 
-	    long int source_pos = ftell(in.stream)-4;	// WAHE edit
+	    long int source_pos = ftell(in.stream);	// WAHE edit
 
             InputStream_readLeb128_u32(&in);
             const struct FuncType *func_type = &types[funcs[func_i].type_idx];
@@ -647,7 +928,7 @@ int main(int argc, char **argv) {
                 for (; local_set_len > 0; local_set_len -= 1) {
                     FuncGen_indent(&fg, out);
                     FuncGen_localDeclare(&fg, out, val_type);
-                    fputs(" = 0;\n", out);
+                    fputs(" = {0};\n", out);	// WAHE edit
                 }
             }
 
@@ -867,6 +1148,7 @@ int main(int argc, char **argv) {
                 //else
                 //    fprintf(out, "%02hhX\n", opcode);
                 //fflush(out); // DEBUG
+
                 switch (opcode) {
                     case WasmOpcode_unreachable:
                         if (unreachable_depth == 0) {
@@ -2236,8 +2518,389 @@ int main(int argc, char **argv) {
                                 if (unreachable_depth == 0) panic("unimplemented opcode");
                         }
                         break;
+
+	//+ WAHE edit
+	// References: https://pengowray.github.io/wasm-ops/ and https://github.com/WebAssembly/spec/blob/main/proposals/simd/SIMD.md
+	case WasmOpcode_simd:
+	{
+		uint32_t lhs, rhs, align, offset;
+		int op = InputStream_readLeb128_u32(&in);
+		long int source_pos = ftell(in.stream);
+		//printf("SIMD opcode 0x%X at pos %lx\n", op, source_pos);
+
+		const uint8_t elem_size[] =
+		{
+			// 0   1    2    3    4    5    6    7    8    9    A    B    C    D    E    F
+			128,   8,   8,  16,  16,  32,  32,   8,  16,  32,  64, 128, 128,   8,   8,   8,   // 0_
+			 16,  32,  64,  32,  64,   8,   8,   8,  16,  16,  16,  32,  32,  64,  64,  32,   // 1_
+			 32,  64,  64,   8,   8,   8,   8,   8,   8,   8,   8,   8,   8,  16,  16,  16,   // 2_
+			 16,  16,  16,  16,  16,  16,  16,  32,  32,  32,  32,  32,  32,  32,  32,  32,   // 3_
+			 32,  32,  32,  32,  32,  32,  32,  64,  64,  64,  64,  64,  64, 128, 128, 128,   // 4_
+			128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,  32,  64,  32,  64,   // 5_
+			  8,   8,   8,   8,   8,   8,   8,  32,  32,  32,  32,   8,   8,   8,   8,   8,   // 6_
+			  8,   8,   8,   8,  64,  64,   8,   8,   8,   8,  64,   8,  16,  16,  32,  32,   // 7_
+			 16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,   // 8_
+			 16,  16,  16,  16,  64,  16,  16,  16,  16,  16,   0,  16,  16,  16,  16,  16,   // 9_
+			 32,  32,   8,  32,  32,  32,  32,  32,  32,  32,  32,   0,  32,  32,  32,  32,   // A_
+			 32,  32,   8,  16,  32,  32,  32,  32,  32,  32,  32,  32,  32,  32,  32,  32,   // B_
+			 64,  64,   0,  64,  64,  32,  32,  64,  64,  64,  64,  64,  64,  64,  64,  64,   // C_
+			 64,  64,  32,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,  64,   // D_
+			 32,  32,  32,  32,  32,  32,  32,  32,  32,  32,  32,  32,  64,  64,  64,  64,   // E_
+			 64,  64,  64,  64,  64,  64,  64,  64,  32,  32,  32,  32,  32,  32,  64,  64,   // F_
+			  8,  32,  32,  32,  32,  32,  32,  64,  64,   8,  16,  32,  64,  32,  32,  64,   // 10_
+			 64,  16,  16,  32,  32                                                           // 11_
+		};
+
+		if (	(WasmSimdOpcode_v128_load <= op && op <= WasmSimdOpcode_v128_store) ||
+			(WasmSimdOpcode_v128_load32_zero <= op && op <= WasmSimdOpcode_v128_load64_zero) )
+		{
+			align = InputStream_readLeb128_u32(&in);
+			offset = InputStream_readLeb128_u32(&in);
+		}
+
+		switch (op)
+		{
+			// 0x00
+			case WasmSimdOpcode_v128_load:
+				if (unreachable_depth == 0)
+				{
+					uint32_t base = FuncGen_stackPop(&fg);
+					FuncGen_stackPush(&fg, out, WasmValType_v128);
+					fprintf(out, "load128_align%u((const uint%u_t *)&m%u[l%u + UINT32_C(%u)]);\n",
+							align, 8 << align, 0, base, offset);
+				}
+				break;
+
+			// Load functions, 0x01 - 0x0A, 0x5C - 0x5D
+			case WasmSimdOpcode_v128_load8x8_s:
+			case WasmSimdOpcode_v128_load8x8_u:
+			case WasmSimdOpcode_v128_load16x4_s:
+			case WasmSimdOpcode_v128_load16x4_u:
+			case WasmSimdOpcode_v128_load32x2_s:
+			case WasmSimdOpcode_v128_load32x2_u:
+			case WasmSimdOpcode_v128_load8_splat:
+			case WasmSimdOpcode_v128_load16_splat:
+			case WasmSimdOpcode_v128_load32_splat:
+			case WasmSimdOpcode_v128_load64_splat:
+			case WasmSimdOpcode_v128_load32_zero:
+			case WasmSimdOpcode_v128_load64_zero:
+				if (unreachable_depth == 0)
+				{
+					uint32_t base = FuncGen_stackPop(&fg);
+					FuncGen_stackPush(&fg, out, WasmValType_v128);
+					fprintf(out, "%s((const uint%u_t *)&m%u[l%u + UINT32_C(%u)]);\n", simd_func_name(op), elem_size[op], 0, base, offset);
+				}
+				break;
+
+			// 0x0B
+			case WasmSimdOpcode_v128_store:
+				if (unreachable_depth == 0)
+				{
+					uint32_t value = FuncGen_stackPop(&fg);
+					uint32_t base = FuncGen_stackPop(&fg);
+					FuncGen_indent(&fg, out);
+					fprintf(out, "store128_align%u((uint%u_t *)&m%u[l%u + UINT32_C(%u)], l%u);\n",
+							align, 8 << align, 0, base, offset, value);
+				}
+				break;
+
+			// 0x0C
+			case WasmSimdOpcode_v128_const:
+			{
+				uint64_t va = InputStream_readLittle_u64(&in);
+				uint64_t vb = InputStream_readLittle_u64(&in);
+
+				if (unreachable_depth == 0)
+				{
+					FuncGen_stackPush(&fg, out, WasmValType_v128);
+					fprintf(out, "V128_C(0x%" PRIX64 ", 0x%" PRIX64 ");\n", va, vb);
+				}
+				break;
+			}
+
+			// 1 arg functions (return variable declared as v128_t)
+			case WasmSimdOpcode_i8x16_swizzle:
+			case WasmSimdOpcode_i8x16_splat:
+			case WasmSimdOpcode_i16x8_splat:
+			case WasmSimdOpcode_i32x4_splat:
+			case WasmSimdOpcode_i64x2_splat:
+			case WasmSimdOpcode_f32x4_splat:
+			case WasmSimdOpcode_f64x2_splat:
+				if (unreachable_depth == 0)
+				{
+					rhs = FuncGen_stackPop(&fg);
+					FuncGen_stackPush(&fg, out, WasmValType_v128);
+					fprintf(out, "%s(l%u);\n", simd_func_name(op), rhs);
+				}
+				break;
+
+			// 1 arg functions (return variable declared as int32_t)
+			case WasmSimdOpcode_v128_any_true:
+			case WasmSimdOpcode_i8x16_all_true:
+			case WasmSimdOpcode_i16x8_all_true:
+			case WasmSimdOpcode_i32x4_all_true:
+			case WasmSimdOpcode_i64x2_all_true:
+				if (unreachable_depth == 0)
+				{
+					rhs = FuncGen_stackPop(&fg);
+					FuncGen_stackPush(&fg, out, WasmValType_i32);
+					fprintf(out, "%s(l%u);\n", simd_func_name(op), rhs);
+				}
+				break;
+
+			// 1 arg functions
+			case WasmSimdOpcode_v128_not:
+			case WasmSimdOpcode_i8x16_abs:
+			case WasmSimdOpcode_i8x16_neg:
+			case WasmSimdOpcode_i8x16_popcnt:
+			case WasmSimdOpcode_f32x4_ceil:
+			case WasmSimdOpcode_f32x4_floor:
+			case WasmSimdOpcode_f32x4_trunc:
+			case WasmSimdOpcode_f32x4_nearest:
+			case WasmSimdOpcode_f64x2_ceil:
+			case WasmSimdOpcode_f64x2_floor:
+			case WasmSimdOpcode_f64x2_trunc:
+			case WasmSimdOpcode_f64x2_nearest:
+			case WasmSimdOpcode_i16x8_abs:
+			case WasmSimdOpcode_i16x8_neg:
+			case WasmSimdOpcode_i32x4_abs:
+			case WasmSimdOpcode_i32x4_neg:
+			case WasmSimdOpcode_f32x4_abs:
+			case WasmSimdOpcode_f32x4_neg:
+			case WasmSimdOpcode_f32x4_sqrt:
+			case WasmSimdOpcode_f64x2_abs:
+			case WasmSimdOpcode_f64x2_neg:
+			case WasmSimdOpcode_f64x2_sqrt:
+			case WasmSimdOpcode_f32x4_convert_i32x4_s:
+			case WasmSimdOpcode_f32x4_convert_i32x4_u:
+			case WasmSimdOpcode_f64x2_convert_low_i32x4_s:
+			case WasmSimdOpcode_f64x2_convert_low_i32x4_u:
+			case WasmSimdOpcode_i16x8_extend_low_i8x16_s:
+			case WasmSimdOpcode_i16x8_extend_high_i8x16_s:
+			case WasmSimdOpcode_i16x8_extend_low_i8x16_u:
+			case WasmSimdOpcode_i16x8_extend_high_i8x16_u:
+			case WasmSimdOpcode_i32x4_extend_low_i16x8_s:
+			case WasmSimdOpcode_i32x4_extend_high_i16x8_s:
+			case WasmSimdOpcode_i32x4_extend_low_i16x8_u:
+			case WasmSimdOpcode_i32x4_extend_high_i16x8_u:
+			case WasmSimdOpcode_i64x2_extend_low_i32x4_s:
+			case WasmSimdOpcode_i64x2_extend_high_i32x4_s:
+			case WasmSimdOpcode_i64x2_extend_low_i32x4_u:
+			case WasmSimdOpcode_i64x2_extend_high_i32x4_u:
+				if (unreachable_depth==0)
+				{
+					lhs = FuncGen_stackAt(&fg, 0);
+					FuncGen_indent(&fg, out);
+					fprintf(out, "l%u = %s(l%u);\n", lhs, simd_func_name(op), lhs);
+				}
+				break;
+
+			// 2 arg functions
+			case WasmSimdOpcode_i8x16_eq:
+			case WasmSimdOpcode_i8x16_ne:
+			case WasmSimdOpcode_i8x16_lt_s:
+			case WasmSimdOpcode_i8x16_lt_u:
+			case WasmSimdOpcode_i8x16_gt_s:
+			case WasmSimdOpcode_i8x16_gt_u:
+			case WasmSimdOpcode_i8x16_le_s:
+			case WasmSimdOpcode_i8x16_le_u:
+			case WasmSimdOpcode_i8x16_ge_s:
+			case WasmSimdOpcode_i8x16_ge_u:
+			case WasmSimdOpcode_i16x8_eq:
+			case WasmSimdOpcode_i16x8_ne:
+			case WasmSimdOpcode_i16x8_lt_s:
+			case WasmSimdOpcode_i16x8_lt_u:
+			case WasmSimdOpcode_i16x8_gt_s:
+			case WasmSimdOpcode_i16x8_gt_u:
+			case WasmSimdOpcode_i16x8_le_s:
+			case WasmSimdOpcode_i16x8_le_u:
+			case WasmSimdOpcode_i16x8_ge_s:
+			case WasmSimdOpcode_i16x8_ge_u:
+			case WasmSimdOpcode_i32x4_eq:
+			case WasmSimdOpcode_i32x4_ne:
+			case WasmSimdOpcode_i32x4_lt_s:
+			case WasmSimdOpcode_i32x4_lt_u:
+			case WasmSimdOpcode_i32x4_gt_s:
+			case WasmSimdOpcode_i32x4_gt_u:
+			case WasmSimdOpcode_i32x4_le_s:
+			case WasmSimdOpcode_i32x4_le_u:
+			case WasmSimdOpcode_i32x4_ge_s:
+			case WasmSimdOpcode_i32x4_ge_u:
+			case WasmSimdOpcode_f32x4_eq:
+			case WasmSimdOpcode_f32x4_ne:
+			case WasmSimdOpcode_f32x4_lt:
+			case WasmSimdOpcode_f32x4_gt:
+			case WasmSimdOpcode_f32x4_le:
+			case WasmSimdOpcode_f32x4_ge:
+			case WasmSimdOpcode_f64x2_eq:
+			case WasmSimdOpcode_f64x2_ne:
+			case WasmSimdOpcode_f64x2_lt:
+			case WasmSimdOpcode_f64x2_gt:
+			case WasmSimdOpcode_f64x2_le:
+			case WasmSimdOpcode_f64x2_ge:
+			case WasmSimdOpcode_v128_and:
+			case WasmSimdOpcode_v128_andnot:
+			case WasmSimdOpcode_v128_or:
+			case WasmSimdOpcode_v128_xor:
+			case WasmSimdOpcode_i8x16_add:
+			case WasmSimdOpcode_i8x16_add_sat_s:
+			case WasmSimdOpcode_i8x16_add_sat_u:
+			case WasmSimdOpcode_i8x16_sub:
+			case WasmSimdOpcode_i8x16_sub_sat_s:
+			case WasmSimdOpcode_i8x16_sub_sat_u:
+			case WasmSimdOpcode_i8x16_min_s:
+			case WasmSimdOpcode_i8x16_min_u:
+			case WasmSimdOpcode_i8x16_max_s:
+			case WasmSimdOpcode_i8x16_max_u:
+			case WasmSimdOpcode_i16x8_add:
+			case WasmSimdOpcode_i16x8_add_sat_s:
+			case WasmSimdOpcode_i16x8_add_sat_u:
+			case WasmSimdOpcode_i16x8_sub:
+			case WasmSimdOpcode_i16x8_sub_sat_s:
+			case WasmSimdOpcode_i16x8_sub_sat_u:
+			case WasmSimdOpcode_i16x8_mul:
+			case WasmSimdOpcode_i16x8_min_s:
+			case WasmSimdOpcode_i16x8_min_u:
+			case WasmSimdOpcode_i16x8_max_s:
+			case WasmSimdOpcode_i16x8_max_u:
+			case WasmSimdOpcode_i32x4_shl:
+			case WasmSimdOpcode_i32x4_shr_s:
+			case WasmSimdOpcode_i32x4_shr_u:
+			case WasmSimdOpcode_i32x4_add:
+			case WasmSimdOpcode_i32x4_sub:
+			case WasmSimdOpcode_i32x4_mul:
+			case WasmSimdOpcode_i32x4_min_s:
+			case WasmSimdOpcode_i32x4_min_u:
+			case WasmSimdOpcode_i32x4_max_s:
+			case WasmSimdOpcode_i32x4_max_u:
+			case WasmSimdOpcode_i64x2_shl:
+			case WasmSimdOpcode_i64x2_shr_s:
+			case WasmSimdOpcode_i64x2_shr_u:
+			case WasmSimdOpcode_i64x2_add:
+			case WasmSimdOpcode_i64x2_sub:
+			case WasmSimdOpcode_i64x2_mul:
+			case WasmSimdOpcode_i64x2_eq:
+			case WasmSimdOpcode_i64x2_ne:
+			case WasmSimdOpcode_i64x2_lt_s:
+			case WasmSimdOpcode_i64x2_gt_s:
+			case WasmSimdOpcode_i64x2_le_s:
+			case WasmSimdOpcode_i64x2_ge_s:
+			case WasmSimdOpcode_f32x4_add:
+			case WasmSimdOpcode_f32x4_sub:
+			case WasmSimdOpcode_f32x4_mul:
+			case WasmSimdOpcode_f32x4_div:
+			case WasmSimdOpcode_f32x4_min:
+			case WasmSimdOpcode_f32x4_max:
+			case WasmSimdOpcode_f32x4_pmin:
+			case WasmSimdOpcode_f32x4_pmax:
+			case WasmSimdOpcode_f64x2_add:
+			case WasmSimdOpcode_f64x2_sub:
+			case WasmSimdOpcode_f64x2_mul:
+			case WasmSimdOpcode_f64x2_div:
+			case WasmSimdOpcode_f64x2_min:
+			case WasmSimdOpcode_f64x2_max:
+			case WasmSimdOpcode_f64x2_pmin:
+			case WasmSimdOpcode_f64x2_pmax:
+				if (unreachable_depth==0)
+				{
+					rhs = FuncGen_stackPop(&fg);
+					lhs = FuncGen_stackAt(&fg, 0);
+					FuncGen_indent(&fg, out);
+					fprintf(out, "l%u = %s(l%u, l%u);\n", lhs, simd_func_name(op), lhs, rhs);
+				}
+				break;
+
+			// Like 2 arg functions but also with 16 immediate bytes of data
+			case WasmSimdOpcode_i8x16_shuffle:
+			{
+				uint8_t d[16];
+
+				for (int i=0; i < 16; i++)
+					d[i] = InputStream_readByte(&in);
+
+				if (unreachable_depth==0)
+				{
+					rhs = FuncGen_stackPop(&fg);
+					lhs = FuncGen_stackAt(&fg, 0);
+					FuncGen_indent(&fg, out);
+					fprintf(out, "l%u = %s(l%u, l%u, (const int8_t[]){", lhs, simd_func_name(op), lhs, rhs);
+					for (int i=0; i < 16; i++)
+						fprintf(out, "%u%s", d[i], i < 15 ? ", " : "});\n");
+				}
+				break;
+			}
+
+			// 3 arg functions
+			case WasmSimdOpcode_v128_bitselect:
+				if (unreachable_depth==0)
+				{
+					uint32_t arg3 = FuncGen_stackPop(&fg);
+					rhs = FuncGen_stackPop(&fg);
+					lhs = FuncGen_stackAt(&fg, 0);
+					FuncGen_indent(&fg, out);
+					fprintf(out, "l%u = %s(l%u, l%u, l%u);\n", lhs, simd_func_name(op), lhs, rhs, arg3);
+				}
+				break;
+
+			// Lane functions
+			case WasmSimdOpcode_i8x16_extract_lane_s:
+			case WasmSimdOpcode_i8x16_extract_lane_u:
+			case WasmSimdOpcode_i16x8_extract_lane_s:
+			case WasmSimdOpcode_i16x8_extract_lane_u:
+			case WasmSimdOpcode_i32x4_extract_lane:
+			case WasmSimdOpcode_i64x2_extract_lane:
+			case WasmSimdOpcode_f32x4_extract_lane:
+			case WasmSimdOpcode_f64x2_extract_lane:
+			{
+				uint32_t lane = InputStream_readLeb128_u32(&in);
+				if (unreachable_depth==0)
+				{
+					lhs = FuncGen_stackPop(&fg);
+
+					enum WasmValType val_type;
+					if (op < WasmSimdOpcode_f32x4_extract_lane)
+						val_type = elem_size[op] == 64 ? WasmValType_i64 : WasmValType_i32;
+					else
+						val_type = elem_size[op] == 64 ? WasmValType_f64 : WasmValType_f32;
+					FuncGen_stackPush(&fg, out, val_type);
+
+					fprintf(out, "%s(l%u, %u);\n", simd_func_name(op), lhs, lane);
+				}
+				break;
+			}
+			
+			case WasmSimdOpcode_i8x16_replace_lane:
+			case WasmSimdOpcode_i16x8_replace_lane:
+			case WasmSimdOpcode_i32x4_replace_lane:
+			case WasmSimdOpcode_i64x2_replace_lane:
+			case WasmSimdOpcode_f32x4_replace_lane:
+			case WasmSimdOpcode_f64x2_replace_lane:
+			{
+				uint32_t lane = InputStream_readLeb128_u32(&in);
+				if (unreachable_depth==0)
+				{
+					rhs = FuncGen_stackPop(&fg);
+					lhs = FuncGen_stackPop(&fg);
+
+					FuncGen_stackPush(&fg, out, WasmValType_v128);
+
+					fprintf(out, "%s(l%u, %u, l%u);\n", simd_func_name(op), lhs, lane, rhs);
+				}
+				break;
+			}
+
+			default:
+				fprintf(stderr, "SIMD opcode 0x%X not implemented at pos %lx\n", op, source_pos);
+		}
+	}
+	//- WAHE edit
+
                 }
+
+		fseek(out, -1, SEEK_CUR);	// WAHE edit, remove \n
+		fprintf(out, "    // ends at %x\n", ftell(in.stream));	// WAHE edit
             }
+
             for (uint32_t param_i = 0; param_i < func_type->param->len; param_i += 1) {
                 if (param_used[param_i]) continue;
                 FuncGen_indent(&fg, out);
