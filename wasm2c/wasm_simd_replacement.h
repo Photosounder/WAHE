@@ -317,12 +317,12 @@ simd_i8x16_relaxed_swizzle
 simd_i32x4_relaxed_trunc_f32x4_s
 simd_i32x4_relaxed_trunc_f32x4_u
 simd_i32x4_relaxed_trunc_f64x2_s_zero
-simd_i32x4_relaxed_trunc_f64x2_u_zero
-simd_f32x4_relaxed_madd
-simd_f32x4_relaxed_nmadd
-simd_f64x2_relaxed_madd
-simd_f64x2_relaxed_nmadd
-simd_i8x16_relaxed_laneselect
+simd_i32x4_relaxed_trunc_f64x2_u_zero*/
+v128_t simd_f32x4_relaxed_madd (v128_t x, v128_t y, v128_t z) { for (int i=0; i<4; i++) x.f32[i] = fma( x.f32[i], y.f32[i], z.f32[i]); return x; }
+v128_t simd_f32x4_relaxed_nmadd(v128_t x, v128_t y, v128_t z) { for (int i=0; i<4; i++) x.f64[i] = fma(-x.f32[i], y.f32[i], z.f32[i]); return x; }
+v128_t simd_f64x2_relaxed_madd (v128_t x, v128_t y, v128_t z) { for (int i=0; i<2; i++) x.f64[i] = fma( x.f64[i], y.f64[i], z.f64[i]); return x; }
+v128_t simd_f64x2_relaxed_nmadd(v128_t x, v128_t y, v128_t z) { for (int i=0; i<2; i++) x.f64[i] = fma(-x.f64[i], y.f64[i], z.f64[i]); return x; }
+/*simd_i8x16_relaxed_laneselect
 simd_i16x8_relaxed_laneselect
 simd_i32x4_relaxed_laneselect
 simd_i64x2_relaxed_laneselect

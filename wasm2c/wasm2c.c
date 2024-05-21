@@ -2832,6 +2832,10 @@ int main(int argc, char **argv) {
 
 			// 3 arg functions
 			case WasmSimdOpcode_v128_bitselect:
+			case WasmSimdOpcode_f32x4_relaxed_madd:
+			case WasmSimdOpcode_f32x4_relaxed_nmadd:
+			case WasmSimdOpcode_f64x2_relaxed_madd:
+			case WasmSimdOpcode_f64x2_relaxed_nmadd:
 				if (unreachable_depth==0)
 				{
 					uint32_t arg3 = FuncGen_stackPop(&fg);

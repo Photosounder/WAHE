@@ -32,7 +32,13 @@ static bool InputStream_atEnd(struct InputStream *self) {
 static uint8_t InputStream_readByte(struct InputStream *self) {
     int value;
     value = fgetc(self->stream);
-    if (value == EOF) panic("unexpected end of input stream");
+    //+ WAHE edit
+    if (value == EOF)
+    {
+	    fprintf(stderr, "At file pos %x: ", ftell(self->stream));
+	    panic("unexpected end of input stream");
+    }
+    //- WAHE edit
     return value;
 }
 
