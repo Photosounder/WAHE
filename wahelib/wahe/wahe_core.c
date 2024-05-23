@@ -1151,6 +1151,20 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			done = 1;
 		}
 
+		// Stack pointer of a WASM module
+		dst_module_id[0] = '\0';
+		sscanf(line, "Get stack pointer of module ID %60s", dst_module_id);
+		if (dst_module_id[0])
+		{
+			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
+			if (dst_ctx && dst_ctx->native == 0)
+			{
+				size_t ptr = wahe_get_module_symbol_address(dst_ctx, "__stack_pointer", 0);
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ptr);
+			}
+			done = 1;
+		}
+
 		// Memory size of a WASM module
 		dst_module_id[0] = '\0';
 		sscanf(line, "Get memory size of module ID %60s", dst_module_id);
