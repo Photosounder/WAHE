@@ -141,6 +141,7 @@ typedef struct
 extern _Thread_local wahe_chain_t *wahe_cur_chain;
 
 extern int wahe_get_module_memory(wahe_module_t *ctx);
+extern size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_name, int verbosity);
 extern void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_func_id func_id, int verbosity);
 extern void wahe_init_all_module_symbols(wahe_module_t *ctx);
 extern size_t call_module_malloc(wahe_module_t *ctx, size_t size);

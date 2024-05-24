@@ -57,7 +57,7 @@ void wahe_bench_point(const char *label, int depth)
 }
 
 #ifdef WAHE_WASMTIME
-void fprint_wasmtime_error(wasmtime_error_t *error, wasm_trap_t *trap)
+void fprint_wasmtime_error(wahe_module_t *ctx, wasmtime_error_t *error, wasm_trap_t *trap)
 {
 	wasm_byte_vec_t error_message;
 
@@ -74,8 +74,31 @@ void fprint_wasmtime_error(wasmtime_error_t *error, wasm_trap_t *trap)
 		wasm_trap_message(trap, &error_message);
 		wasm_trap_delete(trap);
 		fprintf_rl(stderr, "wasm_trap_message(): \"%.*s\"\n", (int) error_message.size, error_message.data);
+		fprintf_rl(stderr, "Module stack pointer %#zx\n", wahe_get_module_symbol_address(ctx, "__stack_pointer", 0));
 		wasm_byte_vec_delete(&error_message);
 	}
+}
+
+wasmtime_val_t wasmtime_val_set_address(wahe_module_t *ctx, size_t address)
+{
+	wasmtime_val_t val;
+
+	val.kind = ctx->address_type;
+
+	if (ctx->address_type == WASMTIME_I32)
+		val.of.i32 = address;
+	else
+		val.of.i64 = address;
+
+	return val;
+}
+
+size_t wasmtime_val_get_address(wasmtime_val_t val)
+{
+	if (val.kind == WASMTIME_I32)
+		return val.of.i32;
+	else
+		return val.of.i64;
 }
 #endif // WAHE_WASMTIME
 
@@ -149,7 +172,7 @@ size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_nam
 		{
 			wasmtime_val_t offset;
 			wasmtime_global_get(ctx->context, &symb_ext.of.global, &offset);
-			addr = offset.of.i64;
+			addr = wasmtime_val_get_address(offset);
 
 			if (verbosity == 1)
 				fprintf_rl(stdout, "Module #%d %s: symbol %s found\n", ctx->module_id, ctx->module_name, symbol_name);
@@ -230,30 +253,6 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 		ctx->data_end = wahe_get_module_symbol_address(ctx, "__data_end", 0);
 	}
 }
-
-#ifdef WAHE_WASMTIME
-wasmtime_val_t wasmtime_val_set_address(wahe_module_t *ctx, size_t address)
-{
-	wasmtime_val_t val;
-
-	val.kind = ctx->address_type;
-
-	if (ctx->address_type == WASMTIME_I32)
-		val.of.i32 = address;
-	else
-		val.of.i64 = address;
-
-	return val;
-}
-
-size_t wasmtime_val_get_address(wasmtime_val_t val)
-{
-	if (val.kind == WASMTIME_I32)
-		return val.of.i32;
-	else
-		return val.of.i64;
-}
-#endif // WAHE_WASMTIME
 
 size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enum wahe_func_id func_id)
 {
@@ -345,7 +344,7 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	if (error || trap)
 	{
 		fprintf_rl(stderr, "Calling %s:%s() failed\n", ctx->module_name, wahe_func_name[func_id]);
-		fprint_wasmtime_error(error, trap);
+		fprint_wasmtime_error(ctx, error, trap);
 		ctx->valid = 0;
 		return 0;
 	}
@@ -604,7 +603,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		if (error)
 		{
 			fprintf_rl(stderr, "Error linking WASI in wasmtime_linker_define_wasi()\n");
-			fprint_wasmtime_error(error, NULL);
+			fprint_wasmtime_error(ctx, error, NULL);
 			return;
 		}
 
@@ -613,7 +612,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		if (error)
 		{
 			fprintf_rl(stderr, "Error compiling the module in wasmtime_module_new()\n");
-			fprint_wasmtime_error(error, NULL);
+			fprint_wasmtime_error(ctx, error, NULL);
 			return;
 		}
 
@@ -627,7 +626,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		if (error)
 		{
 			fprintf_rl(stderr, "Error initialising WASI in wasmtime_context_set_wasi()\n");
-			fprint_wasmtime_error(error, NULL);
+			fprint_wasmtime_error(ctx, error, NULL);
 			return;
 		}
 
@@ -637,7 +636,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		if (error)
 		{
 			fprintf_rl(stderr, "Error defining callback in wasmtime_linker_define_func()\n");
-			fprint_wasmtime_error(error, NULL);
+			fprint_wasmtime_error(ctx, error, NULL);
 			return;
 		}
 		wasm_functype_delete(func_type);
@@ -647,7 +646,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		if (error)
 		{
 			fprintf_rl(stderr, "Error instantiating module %s in wasmtime_linker_module()\n", ctx->module_name);
-			fprint_wasmtime_error(error, NULL);
+			fprint_wasmtime_error(ctx, error, NULL);
 			return;
 		}
 

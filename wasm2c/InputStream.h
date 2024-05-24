@@ -35,7 +35,7 @@ static uint8_t InputStream_readByte(struct InputStream *self) {
     //+ WAHE edit
     if (value == EOF)
     {
-	    fprintf(stderr, "At file pos %x: ", ftell(self->stream));
+	    fprintf(stderr, "At file pos %lx: ", ftell(self->stream));
 	    panic("unexpected end of input stream");
     }
     //- WAHE edit

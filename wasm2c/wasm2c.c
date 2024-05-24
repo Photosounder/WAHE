@@ -643,34 +643,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    struct Func {
-        uint32_t type_idx;
-    } *funcs;
-    (void)InputStream_skipToSection(&in, WasmSectionId_func);
-    {
-        uint32_t len = InputStream_readLeb128_u32(&in);
-        funcs = malloc(sizeof(struct Func) * len);
-        if (funcs == NULL) panic("out of memory");
-        for (uint32_t i = 0; i < len; i += 1) {
-            funcs[i].type_idx = InputStream_readLeb128_u32(&in);
-            const struct FuncType *func_type = &types[funcs[i].type_idx];
-            fputs("static ", out);
-            switch (func_type->result->len) {
-                case 0: fputs("void", out); break;
-                case 1: fputs(WasmValType_toC(func_type->result->types[0]), out); break;
-                default: panic("multiple function returns not supported");
-            }
-            fprintf(out, " f%" PRIu32 "(", i);
-            if (func_type->param->len == 0) fputs("void", out);
-            for (uint32_t param_i = 0; param_i < func_type->param->len; param_i += 1) {
-                if (param_i > 0) fputs(", ", out);
-                fprintf(out, "%s", WasmValType_toC(func_type->param->types[param_i]));
-            }
-            fputs(");\n", out);
-        }
-        fputc('\n', out);
-    }
-
     struct Table {
         int8_t type;
         struct Limits limits;
@@ -775,6 +747,71 @@ int main(int argc, char **argv) {
         fputc('\n', out);
     }
 
+	//+ WAHE edit
+	typedef struct
+	{
+		char *name;
+	} func_symb_t;
+
+	size_t func_symb_count;
+	func_symb_t *func_symb;
+
+	if (InputStream_skipToSection(&in, WasmSectionId_custom))
+	{
+		uint32_t len = InputStream_readLeb128_u32(&in);
+		char *name = calloc(len+1, sizeof(char));
+		for (int i=0; i < len; i++)
+			name[i] = InputStream_readByte(&in);
+		//printf("Custom section:\nlen = %d, name \"%s\"\n", len, name);
+		free(name);
+
+subsection_start:;
+		uint32_t subsection_id = InputStream_readLeb128_u32(&in);
+		//printf("subsection_id %d\n", subsection_id);
+		uint32_t subsection_len = InputStream_readLeb128_u32(&in);
+		long int subsection_start = ftell(in.stream);
+
+		switch (subsection_id)
+		{
+			case 0:		// module name
+				len = InputStream_readLeb128_u32(&in);
+				name = calloc(len+1, sizeof(char));
+				for (int i=0; i < len; i++)
+					name[i] = InputStream_readByte(&in);
+				//printf("\tModule name: %s\n", name);
+				free(name);
+				goto subsection_start;
+
+			case 1:;	// function names
+				uint32_t entry_count = InputStream_readLeb128_u32(&in);
+				func_symb = calloc(entry_count-imports_len, sizeof(func_symb_t));
+				for (int ie=0; ie < entry_count; ie++)
+				{
+					uint32_t entry_id = InputStream_readLeb128_u32(&in);
+					uint32_t len = InputStream_readLeb128_u32(&in);
+					name = calloc(len+1, sizeof(char));
+					for (int i=0; i < len; i++)
+						name[i] = InputStream_readByte(&in);
+
+					if (ie - (int) imports_len >= 0)
+						func_symb[ie-imports_len].name = name;
+					else
+						free(name);
+
+					if (entry_id != ie)
+						fprintf(stderr, "Custom section function name IDs not sequential: %d as entry #%d\n", entry_id, ie);
+
+					//printf("\tf%d() = %s()\n", entry_id-imports_len, name);
+					//free(name);
+				}
+				break;
+
+			case 2:		// local names
+				break;
+		}
+	}
+	//- WAHE edit
+
     //+ WAHE edit
     fprintf(out,
                     "uint32_t wasi_snapshot_preview1_fd_close(uint32_t a) { return 0; }\n"
@@ -783,6 +820,35 @@ int main(int argc, char **argv) {
                     "uint32_t wasi_snapshot_preview1_fd_write(uint32_t a, uint32_t b, uint32_t c, uint32_t d) { return 0; }\n"
            );
     //- WAHE edit
+
+    // WAHE edit: moved this section down
+    struct Func {
+        uint32_t type_idx;
+    } *funcs;
+    (void)InputStream_skipToSection(&in, WasmSectionId_func);
+    {
+        uint32_t len = InputStream_readLeb128_u32(&in);
+        funcs = malloc(sizeof(struct Func) * len);
+        if (funcs == NULL) panic("out of memory");
+        for (uint32_t i = 0; i < len; i += 1) {
+            funcs[i].type_idx = InputStream_readLeb128_u32(&in);
+            const struct FuncType *func_type = &types[funcs[i].type_idx];
+            fputs("static ", out);
+            switch (func_type->result->len) {
+                case 0: fputs("void", out); break;
+                case 1: fputs(WasmValType_toC(func_type->result->types[0]), out); break;
+                default: panic("multiple function returns not supported");
+            }
+            fprintf(out, " f%" PRIu32 "_%s(", i, func_symb[i].name);	// WAHE edit
+            if (func_type->param->len == 0) fputs("void", out);
+            for (uint32_t param_i = 0; param_i < func_type->param->len; param_i += 1) {
+                if (param_i > 0) fputs(", ", out);
+                fprintf(out, "%s", WasmValType_toC(func_type->param->types[param_i]));
+            }
+            fputs(");\n", out);
+        }
+        fputc('\n', out);
+    }
 
     struct Global {
         bool mut;
@@ -838,8 +904,8 @@ int main(int argc, char **argv) {
                     if (strcmp(name, "module_message_input") == 0)
                         fprintf(out, "    if (wahe_run_command == wahe_run_command_dummy)\n"
                             "        sscanf((char *) &m0[l0], \"wahe_run_command() = %%zx\", (size_t *) &wahe_run_command);\n");
-                    fprintf(out, "    %sf%" PRIu32 "(",
-                            func_type->result->len > 0 ? "return " : "", idx - imports_len);
+                    fprintf(out, "    %sf%" PRIu32 "_%s(",
+                            func_type->result->len > 0 ? "return " : "", idx - imports_len, func_symb[idx-imports_len].name);
                     //- WAHE edit
 
                     for (uint32_t param_i = 0; param_i < func_type->param->len; param_i += 1) {
@@ -883,7 +949,7 @@ int main(int argc, char **argv) {
                 if (func_id < imports_len)
                     fprintf(out, "%s_%s", imports[func_id].mod, imports[func_id].name);
                 else
-                    fprintf(out, "f%" PRIu32, func_id - imports_len);
+                    fprintf(out, "f%" PRIu32 "_%s", func_id - imports_len, func_symb[func_id-imports_len].name);	// WAHE edit
                 fputs(";\n", out);
             }
         }
@@ -911,7 +977,7 @@ int main(int argc, char **argv) {
                 case 1: fputs(WasmValType_toC(func_type->result->types[0]), out); break;
                 default: panic("multiple function returns not supported");
             }
-            fprintf(out, " f%" PRIu32 "(", func_i);
+            fprintf(out, " f%" PRIu32 "_%s(", func_i, func_symb[func_i].name);	// WAHE edit
             if (func_type->param->len == 0) fputs("void", out);
             for (uint32_t param_i = 0; param_i < func_type->param->len; param_i += 1) {
                 param_used[param_i] = false;
@@ -1348,7 +1414,7 @@ int main(int argc, char **argv) {
                                     if (func_id < imports_len)
                                         fprintf(out, "%s_%s", imports[func_id].mod, imports[func_id].name);
                                     else
-                                        fprintf(out, "f%" PRIu32, func_id - imports_len);
+                                        fprintf(out, "f%" PRIu32 "_%s", func_id - imports_len, func_symb[func_id-imports_len].name);	// WAHE edit
                                     break;
                                 case WasmOpcode_call_indirect:
                                     fputs("(*(", out);
@@ -2902,7 +2968,7 @@ int main(int argc, char **argv) {
                 }
 
 		fseek(out, -1, SEEK_CUR);	// WAHE edit, remove \n
-		fprintf(out, "    // ends at %x\n", ftell(in.stream));	// WAHE edit
+		fprintf(out, "    // ends at %lx\n", ftell(in.stream));	// WAHE edit
             }
 
             for (uint32_t param_i = 0; param_i < func_type->param->len; param_i += 1) {

@@ -4,6 +4,7 @@
 #include "panic.h"
 
 enum WasmSectionId {
+    WasmSectionId_custom    =  0,	// WAHE edit
     WasmSectionId_type      =  1,
     WasmSectionId_import    =  2,
     WasmSectionId_func      =  3,
