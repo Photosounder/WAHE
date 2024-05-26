@@ -52,7 +52,7 @@ typedef struct
 	wasmtime_valkind_t address_type;
 	wasmtime_func_t func[WAHE_FUNC_COUNT];
 	#endif // WAHE_WASMTIME
-	size_t stack, data_end, heap_base, memory_size, cita_time_addr;
+	size_t stack_base, data_end, heap_base, memory_size, cita_time_addr;
 	uint32_t page_count_initial, page_count_max;
 
 	// Specific to native modules

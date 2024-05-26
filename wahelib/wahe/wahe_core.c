@@ -583,7 +583,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 
 		// Parse sections of the WASM binary
 		io_override_set_buffer();
-		ctx->stack = wasmbin_read_stack_pointer((FILE *) &wasm_buf);
+		ctx->stack_base = wasmbin_read_stack_pointer((FILE *) &wasm_buf);
 		wasmbin_read_memory_size((FILE *) &wasm_buf, &ctx->page_count_initial, &ctx->page_count_max);
 		io_override_set_FILE();
 
@@ -661,7 +661,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		ctx->address_type = WASMTIME_I32;
 
 		// Print details
-		fprintf_rl(stdout, "Stack %#zx, heap base %#zx, data end %#zx\n", ctx->stack, ctx->heap_base, ctx->data_end);
+		fprintf_rl(stdout, "Stack base %#zx, heap base %#zx, data end %#zx\n", ctx->stack_base, ctx->heap_base, ctx->data_end);
 		fprintf_rl(stdout, "Initial memory %zu kB, max memory %zu kB\n", ctx->page_count_initial*64ULL, ctx->page_count_max*64ULL);
 
 		#else
@@ -689,7 +689,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	{
 		int version_pos = *(int32_t *)&ctx->memory_ptr[ctx->heap_base+4];
 		char *version = &ctx->memory_ptr[ctx->heap_base + version_pos];
-		if (strcmp(version, "CITA 1.0 32-bit"))
+		if (strncmp(version, "CITA 1.0\nAddress 4", 18))
 			fprintf_rl(stderr, "Module %s has an unknown CIT Alloc version: \"%s\"\n", ctx->module_name, version);
 		else
 			ctx->cita_time_addr = ctx->heap_base + 12;
