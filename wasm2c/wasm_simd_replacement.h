@@ -122,11 +122,11 @@ v128_t simd_f64x2_le(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(
 v128_t simd_f64x2_ge(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(a.f64[i] >= b.f64[i]); return a; }
 
 // Bitwise operations
-v128_t simd_v128_not(v128_t a)              { for (int i=0; i<2; i++) a.u64[i] = ~a.u64[i]; return a; }
-v128_t simd_v128_and(v128_t a, v128_t b)    { for (int i=0; i<2; i++) a.u64[i] &= b.u64[i]; return a; }
+v128_t simd_v128_not   (v128_t a)           { for (int i=0; i<2; i++) a.u64[i] = ~a.u64[i]; return a; }
+v128_t simd_v128_and   (v128_t a, v128_t b) { for (int i=0; i<2; i++) a.u64[i] &= b.u64[i]; return a; }
 v128_t simd_v128_andnot(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.u64[i] &= ~b.u64[i]; return a; }
-v128_t simd_v128_or (v128_t a, v128_t b)    { for (int i=0; i<2; i++) a.u64[i] |= b.u64[i]; return a; }
-v128_t simd_v128_xor(v128_t a, v128_t b)    { for (int i=0; i<2; i++) a.u64[i] ^= b.u64[i]; return a; }
+v128_t simd_v128_or    (v128_t a, v128_t b) { for (int i=0; i<2; i++) a.u64[i] |= b.u64[i]; return a; }
+v128_t simd_v128_xor   (v128_t a, v128_t b) { for (int i=0; i<2; i++) a.u64[i] ^= b.u64[i]; return a; }
 v128_t simd_v128_bitselect(v128_t a, v128_t b, v128_t c) { for (int i=0; i<2; i++) a.u64[i] = a.u64[i] & c.u64[i] | b.u64[i] & ~c.u64[i]; return a; }
 int32_t simd_v128_any_true(v128_t a) { return a.u64[0] != 0 | a.u64[1] != 0; }
 
@@ -175,12 +175,15 @@ simd_i16x8_extadd_pairwise_i8x16_s
 simd_i16x8_extadd_pairwise_i8x16_u
 simd_i32x4_extadd_pairwise_i16x8_s
 simd_i32x4_extadd_pairwise_i16x8_u
+*/
 
-simd_i16x8_abs
-simd_i16x8_neg
-simd_i16x8_q15mulr_sat_s
-simd_i16x8_all_true
-simd_i16x8_bitmask
+v128_t simd_i16x8_abs(v128_t a) { for (int i=0; i<8; i++) a.i16[i] = abs(a.i16[i]); return a; }
+v128_t simd_i16x8_neg(v128_t a) { for (int i=0; i<8; i++) a.i16[i] = -a.i16[i]; return a; }
+/* TODO
+simd_i16x8_q15mulr_sat_s*/
+int32_t simd_i16x8_all_true(v128_t a) { for (int i=0; i<8; i++) if (a.u16[i] == 0) return 0; return 1; }
+int32_t simd_i16x8_bitmask(v128_t a) { int r=0; for (int i=0; i<8; i++) if (a.i16[i] < 0) r |= (1 << i); return r; }
+/* TODO
 simd_i16x8_narrow_i32x4_s
 simd_i16x8_narrow_i32x4_u*/
 v128_t simd_i16x8_extend_low_i8x16_s(v128_t a)  { for (int i=7; i>=0; i--) a.i16[i] = a.i8[i];   return a; }
@@ -210,9 +213,8 @@ simd_i16x8_extmul_high_i8x16_u
 */
 v128_t simd_i32x4_abs(v128_t a) { for (int i=0; i<4; i++) a.i32[i] = abs(a.i32[i]); return a; }
 v128_t simd_i32x4_neg(v128_t a) { for (int i=0; i<4; i++) a.i32[i] = -a.i32[i]; return a; }
-/* TODO
-simd_i32x4_all_true
-simd_i32x4_bitmask*/
+int32_t simd_i32x4_all_true(v128_t a) { for (int i=0; i<4; i++) if (a.u32[i] == 0) return 0; return 1; }
+int32_t simd_i32x4_bitmask(v128_t a) { int r=0; for (int i=0; i<4; i++) if (a.i32[i] < 0) r |= (1 << i); return r; }
 v128_t simd_i32x4_extend_low_i16x8_s(v128_t a)  { for (int i=3; i>=0; i--) a.i32[i] = a.i16[i];   return a; }
 v128_t simd_i32x4_extend_high_i16x8_s(v128_t a) { for (int i=3; i>=0; i--) a.i32[i] = a.i16[i+4]; return a; }
 v128_t simd_i32x4_extend_low_i16x8_u(v128_t a)  { for (int i=3; i>=0; i--) a.u32[i] = a.u16[i];   return a; }
@@ -235,12 +237,12 @@ simd_i32x4_extmul_low_i16x8_s
 simd_i32x4_extmul_high_i16x8_s
 simd_i32x4_extmul_low_i16x8_u
 simd_i32x4_extmul_high_i16x8_u
-
-simd_i64x2_abs
-simd_i64x2_neg
-simd_i64x2_all_true
-simd_i64x2_bitmask
 */
+
+v128_t simd_i64x2_abs(v128_t a) { for (int i=0; i<2; i++) a.i64[i] = llabs(a.i64[i]); return a; }
+v128_t simd_i64x2_neg(v128_t a) { for (int i=0; i<2; i++) a.i64[i] = -a.i64[i]; return a; }
+int32_t simd_i64x2_all_true(v128_t a) { for (int i=0; i<2; i++) if (a.u64[i] == 0) return 0; return 1; }
+int32_t simd_i64x2_bitmask(v128_t a) { int r=0; for (int i=0; i<2; i++) if (a.i64[i] < 0) r |= (1 << i); return r; }
 v128_t simd_i64x2_extend_low_i32x4_s(v128_t a)  { for (int i=1; i>=0; i--) a.i64[i] = a.i32[i];   return a; }
 v128_t simd_i64x2_extend_high_i32x4_s(v128_t a) { for (int i=1; i>=0; i--) a.i64[i] = a.i32[i+2]; return a; }
 v128_t simd_i64x2_extend_low_i32x4_u(v128_t a)  { for (int i=1; i>=0; i--) a.u64[i] = a.u32[i];   return a; }
@@ -249,16 +251,19 @@ v128_t simd_i64x2_extend_high_i32x4_u(v128_t a) { for (int i=1; i>=0; i--) a.u64
 v128_t simd_i64x2_shl(v128_t a, uint32_t s)   { s &= 63; for (int i=0; i<2; i++) a.u64[i] <<= s; return a; }
 v128_t simd_i64x2_shr_s(v128_t a, uint32_t s) { s &= 63; for (int i=0; i<2; i++) a.i64[i] >>= s; return a; }
 v128_t simd_i64x2_shr_u(v128_t a, uint32_t s) { s &= 63; for (int i=0; i<2; i++) a.u64[i] >>= s; return a; }
+v128_t simd_i64x2_add(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] += b.i64[i]; return a; }
+v128_t simd_i64x2_sub(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] -= b.i64[i]; return a; }
+v128_t simd_i64x2_mul(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] *= b.i64[i]; return a; }
+
+
+
+v128_t simd_i64x2_eq  (v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(a.u64[i] == b.u64[i]); return a; }
+v128_t simd_i64x2_ne  (v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(a.u64[i] != b.u64[i]); return a; }
+v128_t simd_i64x2_lt_s(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(a.i64[i]  < b.i64[i]); return a; }
+v128_t simd_i64x2_gt_s(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(a.i64[i]  > b.i64[i]); return a; }
+v128_t simd_i64x2_le_s(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(a.i64[i] <= b.i64[i]); return a; }
+v128_t simd_i64x2_ge_s(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(a.i64[i] >= b.i64[i]); return a; }
 /* TODO
-simd_i64x2_add
-simd_i64x2_sub
-simd_i64x2_mul
-simd_i64x2_eq
-simd_i64x2_ne
-simd_i64x2_lt_s
-simd_i64x2_gt_s
-simd_i64x2_le_s
-simd_i64x2_ge_s
 simd_i64x2_extmul_low_i32x4_s
 simd_i64x2_extmul_high_i32x4_s
 simd_i64x2_extmul_low_i32x4_u

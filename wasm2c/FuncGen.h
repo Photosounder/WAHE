@@ -1,7 +1,6 @@
 #ifndef FUNC_GEN_H
 #define FUNC_GEN_H
 
-#include "panic.h"
 #include "wasm.h"
 
 #include <inttypes.h>
@@ -70,7 +69,7 @@ static uint32_t FuncGen_localAlloc(struct FuncGen *self, int8_t type) {
         self->type_len += 10;
         self->type_len *= 2;
         self->type = realloc(self->type, sizeof(int8_t) * self->type_len);
-        if (self->type == NULL) panic("out of memory");
+        if (self->type == NULL) panic(self, "out of memory");
     }
     uint32_t local_idx = self->type_i;
     self->type[local_idx] = type;
@@ -114,7 +113,7 @@ static void FuncGen_stackPush(struct FuncGen *self, FILE *out, enum WasmValType 
         self->stack_len += 10;
         self->stack_len *= 2;
         self->stack = realloc(self->stack, sizeof(uint32_t) * self->stack_len);
-        if (self->stack == NULL) panic("out of memory");
+        if (self->stack == NULL) panic(self, "out of memory");
     }
     FuncGen_indent(self, out);
     self->stack[self->stack_i] = FuncGen_reuseLocal(self, out, val_type);
@@ -131,7 +130,7 @@ static uint32_t FuncGen_stackPop(struct FuncGen *self) {
         self->reuse_len += 10;
         self->reuse_len *= 2;
         self->reuse = realloc(self->reuse, sizeof(uint32_t) * self->reuse_len);
-        if (self->reuse == NULL) panic("out of memory");
+        if (self->reuse == NULL) panic(self, "out of memory");
     }
     self->stack_i -= 1;
     uint32_t local_idx = self->stack[self->stack_i];
@@ -152,7 +151,7 @@ static void FuncGen_blockBegin(struct FuncGen *self, FILE *out, enum WasmOpcode 
         self->block_len += 10;
         self->block_len *= 2;
         self->block = realloc(self->block, sizeof(struct Block) * self->block_len);
-        if (self->block == NULL) panic("out of memory");
+        if (self->block == NULL) panic(self, "out of memory");
     }
 
     if (kind == WasmOpcode_if) {
@@ -177,7 +176,7 @@ static void FuncGen_blockBegin(struct FuncGen *self, FILE *out, enum WasmOpcode 
         self->reuse_len += 10;
         self->reuse_len *= 2;
         self->reuse = realloc(self->reuse, sizeof(uint32_t) * self->reuse_len);
-        if (self->reuse == NULL) panic("out of memory");
+        if (self->reuse == NULL) panic(self, "out of memory");
     }
     memcpy(&self->reuse[self->reuse_i], &self->reuse[reuse_top], sizeof(uint32_t) * reuse_n);
     self->reuse_i += reuse_n;

@@ -1,7 +1,20 @@
 #ifndef WASM_H
 #define WASM_H
 
-#include "panic.h"
+#include <stdlib.h>
+#include <stdio.h>
+
+struct InputStream {
+    FILE *stream;
+};
+
+// WAHE edit
+#define panic(in, fmt, ...) { \
+	if (in) fprintf(stderr, "At file pos 0x%lx:\n", ftell(((struct InputStream *)in)->stream)); \
+	fprintf(stderr, (fmt"\n"), ##__VA_ARGS__); \
+	fflush(stderr); \
+	__builtin_debugtrap(); \
+	abort(); }
 
 enum WasmSectionId {
     WasmSectionId_custom    =  0,	// WAHE edit
@@ -38,7 +51,7 @@ static const char *WasmValType_toC(enum WasmValType val_type) {
         case WasmValType_v128: return "v128_t";		// WAHE edit
         case WasmValType_funcref: return "void (*)(void)";
         case WasmValType_externref: return "void *";
-        default: panic("unsupported value type");
+        default: panic(NULL, "Unsupported value type %d", val_type);	// WAHE edit
     }
     return NULL;
 }
@@ -51,7 +64,7 @@ static const char *WasmMut_toC(enum WasmMut val_type) {
     switch (val_type) {
         case WasmMut_const: return "const ";
         case WasmMut_var: return "";
-        default: panic("unsupported mut");
+        default: panic(NULL, "Unsupported mut %d", val_type);	// WAHE edit
     }
 }
 

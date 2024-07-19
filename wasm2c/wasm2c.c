@@ -2,7 +2,6 @@
 
 #include "FuncGen.h"
 #include "InputStream.h"
-#include "panic.h"
 #include "wasm.h"
 
 #include <inttypes.h>
@@ -37,29 +36,37 @@ static const struct FuncType *FuncType_blockType(const struct FuncType *types, i
         case WasmValType_f32: return &none_f32;
         case WasmValType_f64: return &none_f64;
         case WasmValType_empty: return &none_none;
-        default: panic("unsupported block type");
+        default: panic(NULL, "unsupported block type");
     }
     return NULL;
 }
 
-static uint32_t evalExpr(struct InputStream *in) {
-    uint32_t value;
+//+ WAHE edit
+static uint64_t evalExpr(struct InputStream *in) {
+    uint64_t value;
     while (true) {
-        switch (InputStream_readByte(in)) {
+	int op = InputStream_readByte(in);
+        switch (op) {
             case WasmOpcode_end: return value;
 
             case WasmOpcode_i32_const:
                 value = (uint32_t)InputStream_readLeb128_i32(in);
                 break;
 
-            default: panic("unsupported expr opcode");
+            case WasmOpcode_i64_const:
+                value = (uint64_t)InputStream_readLeb128_i64(in);
+                break;
+
+            default: panic(in, "evalExpr() unsupported expr opcode %d | 0x%x", op, op);
         }
     }
 }
+//- WAHE edit
 
 static void renderExpr(FILE *out, struct InputStream *in) {
     while (true) {
-        switch (InputStream_readByte(in)) {
+	int op = InputStream_readByte(in);	// WAHE edit
+        switch (op) {				// WAHE edit
             case WasmOpcode_end: return;
 
             case WasmOpcode_i32_const: {
@@ -68,7 +75,15 @@ static void renderExpr(FILE *out, struct InputStream *in) {
                 break;
             }
 
-            default: panic("unsupported expr opcode");
+	    //+ WAHE edit
+            case WasmOpcode_i64_const: {
+                uint64_t value = (uint64_t)InputStream_readLeb128_i64(in);
+                fprintf(out, "UINT64_C(0x%" PRIX64 ")", value);
+                break;
+            }
+	    //- WAHE edit
+
+            default: panic(in, "renderExpr() unsupported expr opcode %d | 0x%x", op, op);	// WAHE edit
         }
     }
 }
@@ -418,11 +433,11 @@ int main(int argc, char **argv) {
     if (InputStream_readByte(&in) != '\0' ||
         InputStream_readByte(&in) != 'a'  ||
         InputStream_readByte(&in) != 's'  ||
-        InputStream_readByte(&in) != 'm') panic("input is not a zstd-compressed wasm file");
-    if (InputStream_readLittle_u32(&in) != 1) panic("unsupported wasm version");
+        InputStream_readByte(&in) != 'm') panic(&in, "input is not a zstd-compressed wasm file");
+    if (InputStream_readLittle_u32(&in) != 1) panic(&in, "unsupported wasm version");
 
     FILE *out = fopen(argv[2], "wb");
-    if (out == NULL) panic("unable to open output file");
+    if (out == NULL) panic(&in, "unable to open output file");
 
     // WAHE edit
     fprintf(out,
@@ -634,9 +649,9 @@ int main(int argc, char **argv) {
     {
         uint32_t len = InputStream_readLeb128_u32(&in);
         types = malloc(sizeof(struct FuncType) * len);
-        if (types == NULL) panic("out of memory");
+        if (types == NULL) panic(&in, "out of memory");
         for (uint32_t i = 0; i < len; i += 1) {
-            if (InputStream_readByte(&in) != 0x60) panic("expected functype");
+            if (InputStream_readByte(&in) != 0x60) panic(&in, "expected functype");
             types[i].param = InputStream_readResultType(&in);
             if (types[i].param->len > max_param_len) max_param_len = types[i].param->len;
             types[i].result = InputStream_readResultType(&in);
@@ -651,20 +666,19 @@ int main(int argc, char **argv) {
     {
         uint32_t len = InputStream_readLeb128_u32(&in);
         tables = malloc(sizeof(struct Table) * len);
-        if (tables == NULL) panic("out of memory");
+        if (tables == NULL) panic(&in, "out of memory");
         for (uint32_t i = 0; i < len; i += 1) {
             int64_t ref_type = InputStream_readLeb128_i64(&in);
             switch (ref_type) {
                 case WasmValType_funcref:
                     break;
 
-                default: panic("unsupported reftype");
+                default: panic(&in, "unsupported reftype");
             }
             tables[i].type = ref_type;
             tables[i].limits = InputStream_readLimits(&in);
-            if (tables[i].limits.min != tables[i].limits.max) panic("growable table not supported");
-            fprintf(out, "static void (*t%" PRIu32 "[UINT32_C(%" PRIu32 ")])(void);\n",
-                    i, tables[i].limits.min);
+            if (tables[i].limits.min != tables[i].limits.max) panic(&in, "growable table not supported");
+            fprintf(out, "static void (*t%" PRIu32 "[UINT%d_C(%" PRIu64 ")])(void);\n", i, tables[i].limits.bits, tables[i].limits.min);	// WAHE edit
         }
         fputc('\n', out);
     }
@@ -676,7 +690,7 @@ int main(int argc, char **argv) {
     uint32_t mems_len = InputStream_readLeb128_u32(&in);
     {
         mems = malloc(sizeof(struct Mem) * mems_len);
-        if (mems == NULL) panic("out of memory");
+        if (mems == NULL) panic(&in, "out of memory");
         for (uint32_t i = 0; i < mems_len; i += 1) {
             mems[i].limits = InputStream_readLimits(&in);
             fprintf(out, "static uint8_t *m%" PRIu32 ";\n"
@@ -701,7 +715,7 @@ int main(int argc, char **argv) {
     uint32_t imports_len = InputStream_readLeb128_u32(&in);
     {
         imports = malloc(sizeof(struct Import) * imports_len);
-        if (imports == NULL) panic("out of memory");
+        if (imports == NULL) panic(&in, "out of memory");
         for (uint32_t i = 0; i < imports_len; i += 1) {
             imports[i].mod = InputStream_readName(&in);
             imports[i].name = InputStream_readName(&in);
@@ -723,7 +737,7 @@ int main(int argc, char **argv) {
                         switch (func_type->result->len) {
                             case 0: fputs("void", out); break;
                             case 1: fputs(WasmValType_toC(func_type->result->types[0]), out); break;
-                            default: panic("multiple function returns not supported");
+                            default: panic(&in, "multiple function returns not supported");
                         }
                         fprintf(out, " %s_%s(", imports[i].mod, imports[i].name);
                         if (func_type->param->len == 0) fputs("void", out);
@@ -741,7 +755,7 @@ int main(int argc, char **argv) {
                 case 0x02: // mem
                 case 0x03: // global
                 default:
-                    panic("unsupported import type");
+                    panic(&in, "unsupported import type");
             }
         }
         fputc('\n', out);
@@ -829,7 +843,7 @@ subsection_start:;
     {
         uint32_t len = InputStream_readLeb128_u32(&in);
         funcs = malloc(sizeof(struct Func) * len);
-        if (funcs == NULL) panic("out of memory");
+        if (funcs == NULL) panic(&in, "out of memory");
         for (uint32_t i = 0; i < len; i += 1) {
             funcs[i].type_idx = InputStream_readLeb128_u32(&in);
             const struct FuncType *func_type = &types[funcs[i].type_idx];
@@ -837,7 +851,7 @@ subsection_start:;
             switch (func_type->result->len) {
                 case 0: fputs("void", out); break;
                 case 1: fputs(WasmValType_toC(func_type->result->types[0]), out); break;
-                default: panic("multiple function returns not supported");
+                default: panic(&in, "multiple function returns not supported");
             }
             fprintf(out, " f%" PRIu32 "_%s(", i, func_symb[i].name);	// WAHE edit
             if (func_type->param->len == 0) fputs("void", out);
@@ -858,7 +872,7 @@ subsection_start:;
     {
         uint32_t len = InputStream_readLeb128_u32(&in);
         globals = malloc(sizeof(struct Global) * len);
-        if (globals == NULL) panic("out of memory");
+        if (globals == NULL) panic(&in, "out of memory");
         for (uint32_t i = 0; i < len; i += 1) {
             int64_t val_type = InputStream_readLeb128_i64(&in);
             enum WasmMut mut = InputStream_readByte(&in);
@@ -881,13 +895,13 @@ subsection_start:;
             uint32_t idx = InputStream_readLeb128_u32(&in);
             switch (kind) {
                 case 0x00: {
-                    if (idx < imports_len) panic("can't export an import");
+                    if (idx < imports_len) panic(&in, "can't export an import");
 		    fprintf(out, "EXPORT ");	// WAHE
                     const struct FuncType *func_type = &types[funcs[idx - imports_len].type_idx];
                     switch (func_type->result->len) {
                         case 0: fputs("void", out); break;
                         case 1: fputs(WasmValType_toC(func_type->result->types[0]), out); break;
-                        default: panic("multiple function returns not supported");
+                        default: panic(&in, "multiple function returns not supported");
                     }
                     fprintf(out, " %s(", name);		// WAHE edit
                     if (func_type->param->len == 0) fputs("void", out);
@@ -925,7 +939,7 @@ subsection_start:;
                     break;
                 //- WAHE edit
 
-                default: panic("unsupported export kind");
+                default: panic(&in, "unsupported export kind");
             }
             free(name);
         }
@@ -939,7 +953,7 @@ subsection_start:;
         for (uint32_t segment_i = 0; segment_i < len; segment_i += 1) {
             uint32_t table_idx = 0;
             uint32_t elem_type = InputStream_readLeb128_u32(&in);
-            if (elem_type != 0x00) panic("unsupported elem type");
+            if (elem_type != 0x00) panic(&in, "unsupported elem type");
             uint32_t offset = evalExpr(&in);
             uint32_t segment_len = InputStream_readLeb128_u32(&in);
             for (uint32_t i = 0; i < segment_len; i += 1) {
@@ -975,7 +989,7 @@ subsection_start:;
             switch (func_type->result->len) {
                 case 0: fputs("void", out); break;
                 case 1: fputs(WasmValType_toC(func_type->result->types[0]), out); break;
-                default: panic("multiple function returns not supported");
+                default: panic(&in, "multiple function returns not supported");
             }
             fprintf(out, " f%" PRIu32 "_%s(", func_i, func_symb[func_i].name);	// WAHE edit
             if (func_type->param->len == 0) fputs("void", out);
@@ -1325,7 +1339,7 @@ subsection_start:;
                                     case WasmOpcode_br_if:
                                         rhs = FuncGen_stackAt(&fg, stack_i);
                                         break;
-                                    default: panic("unexpected opcode");
+                                    default: panic(&in, "unexpected opcode");
                                 }
                                 FuncGen_cont(&fg, out);
                                 fprintf(out, "l%" PRIu32 " = l%" PRIu32 ";\n", lhs, rhs);
@@ -1373,7 +1387,7 @@ subsection_start:;
                             switch (func_type->result->len) {
                                 case 0: break;
                                 case 1: fprintf(out, " l%" PRIu32, FuncGen_stackPop(&fg)); break;
-                                default: panic("multiple function returns not supported");
+                                default: panic(&in, "multiple function returns not supported");
                             }
                             fputs(";\n", out);
                             unreachable_depth += 1;
@@ -1407,7 +1421,7 @@ subsection_start:;
                             switch (callee_func_type->result->len) {
                                 case 0: FuncGen_indent(&fg, out); break;
                                 case 1: FuncGen_stackPush(&fg, out, callee_func_type->result->types[0]); break;
-                                default: panic("multiple function returns not supported");
+                                default: panic(&in, "multiple function returns not supported");
                             }
                             switch (opcode) {
                                 case WasmOpcode_call:
@@ -1421,7 +1435,7 @@ subsection_start:;
                                     switch (callee_func_type->result->len) {
                                         case 0: fputs("void", out); break;
                                         case 1: fputs(WasmValType_toC(callee_func_type->result->types[0]), out); break;
-                                        default: panic("multiple function returns not supported");
+                                        default: panic(&in, "multiple function returns not supported");
                                     }
                                     fputs(" (*)(", out);
                                     if (callee_func_type->param->len == 0) fputs("void", out);
@@ -1511,7 +1525,7 @@ subsection_start:;
                     case WasmOpcode_table_get:
                     case WasmOpcode_table_set:
                         (void)InputStream_readLeb128_u32(&in);
-                        if (unreachable_depth == 0) panic("unimplemented opcode");
+                        if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
                         break;
 
                     case WasmOpcode_i32_load: {
@@ -1877,7 +1891,7 @@ subsection_start:;
                                 case WasmOpcode_i32_gt_u: operator = ">";  break;
                                 case WasmOpcode_i32_le_u: operator = "<="; break;
                                 case WasmOpcode_i32_ge_u: operator = ">="; break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_indent(&fg, out);
                             fprintf(out, "l%" PRIu32 " = l%" PRIu32 " %s l%" PRIu32 ";\n",
@@ -1898,7 +1912,7 @@ subsection_start:;
                                 case WasmOpcode_i32_gt_s: operator = ">";  break;
                                 case WasmOpcode_i32_le_s: operator = "<="; break;
                                 case WasmOpcode_i32_ge_s: operator = ">="; break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_indent(&fg, out);
                             fprintf(out, "l%" PRIu32 " = (int32_t)l%" PRIu32 " %s (int32_t)l%" PRIu32
@@ -1967,11 +1981,10 @@ subsection_start:;
                                 case WasmOpcode_f64_ge:
                                     operator = ">=";
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_stackPush(&fg, out, WasmValType_i32);
-                            fprintf(out, "l%" PRIu32 " = l%" PRIu32 " %s l%" PRIu32 ";\n",
-                                    lhs, lhs, operator, rhs);
+                            fprintf(out, "l%" PRIu32 " %s l%" PRIu32 ";\n", lhs, operator, rhs);	// WAHE edit
                         }
                         break;
                     case WasmOpcode_i64_lt_s:
@@ -1988,7 +2001,7 @@ subsection_start:;
                                 case WasmOpcode_i64_gt_s: operator = ">";  break;
                                 case WasmOpcode_i64_le_s: operator = "<="; break;
                                 case WasmOpcode_i64_ge_s: operator = ">="; break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_stackPush(&fg, out, WasmValType_i32);
                             fprintf(out, "l%" PRIu32 " = (int64_t)l%" PRIu32 " %s (int64_t)l%" PRIu32
@@ -2041,7 +2054,7 @@ subsection_start:;
                                 case WasmOpcode_f64_trunc:   function = "trunc";      break;
                                 case WasmOpcode_f64_nearest: function = "round";      break;
                                 case WasmOpcode_f64_sqrt:    function = "sqrt";       break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_indent(&fg, out);
                             fprintf(out, "l%" PRIu32 " = %s(l%" PRIu32 ");\n", lhs, function, lhs);
@@ -2117,7 +2130,7 @@ subsection_start:;
                                 case WasmOpcode_i64_xor:
                                     operator = '^';
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_indent(&fg, out);
                             fprintf(out, "l%" PRIu32 " %c= l%" PRIu32 ";\n", lhs, operator, rhs);
@@ -2142,7 +2155,7 @@ subsection_start:;
                                 case WasmOpcode_i64_rem_s:
                                     operator = '%';
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             switch (opcode) {
                                 case WasmOpcode_i32_div_s:
@@ -2153,7 +2166,7 @@ subsection_start:;
                                 case WasmOpcode_i64_rem_s:
                                     width = 64;
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_indent(&fg, out);
                             fprintf(out, "l%" PRIu32 " = (uint%u_t)((int%u_t)l%" PRIu32 " %c "
@@ -2180,7 +2193,7 @@ subsection_start:;
                                 case WasmOpcode_i64_shr_u:
                                     operator = '>';
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             switch (opcode) {
                                 case WasmOpcode_i32_shl:
@@ -2191,7 +2204,7 @@ subsection_start:;
                                 case WasmOpcode_i64_shr_u:
                                     width = 64;
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_indent(&fg, out);
                             fprintf(out, "l%" PRIu32 " %c%c= l%" PRIu32 " & 0x%X;\n",
@@ -2211,7 +2224,7 @@ subsection_start:;
                                 case WasmOpcode_i64_shr_s:
                                     operator = '>';
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             switch (opcode) {
                                 case WasmOpcode_i32_shr_s:
@@ -2220,7 +2233,7 @@ subsection_start:;
                                 case WasmOpcode_i64_shr_s:
                                     width = 64;
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_indent(&fg, out);
                             fprintf(out, "l%" PRIu32 " = (uint%u_t)((int%u_t)l%" PRIu32 " %c%c "
@@ -2250,7 +2263,7 @@ subsection_start:;
                                     forward_operator = '>';
                                     reverse_operator = '<';
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             switch (opcode) {
                                 case WasmOpcode_i32_rotl:
@@ -2261,7 +2274,7 @@ subsection_start:;
                                 case WasmOpcode_i64_rotr:
                                     width = 64;
                                     break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_indent(&fg, out);
                             fprintf(out, "l%" PRIu32" = l%" PRIu32 " %c%c (l%" PRIu32 " & 0x%X) | "
@@ -2288,7 +2301,7 @@ subsection_start:;
                                 case WasmOpcode_f64_min:      function = "fmin";      break;
                                 case WasmOpcode_f64_max:      function = "fmax";      break;
                                 case WasmOpcode_f64_copysign: function = "copysign";  break;
-                                default: panic("unreachable");
+                                default: panic(&in, "unreachable");
                             }
                             FuncGen_indent(&fg, out);
                             fprintf(out, "l%" PRIu32 " = %s(l%" PRIu32 ", l%" PRIu32 ");\n",
@@ -2518,16 +2531,16 @@ subsection_start:;
                             case WasmPrefixedOpcode_i64_trunc_sat_f32_u:
                             case WasmPrefixedOpcode_i64_trunc_sat_f64_s:
                             case WasmPrefixedOpcode_i64_trunc_sat_f64_u:
-                                if (unreachable_depth == 0) panic("unimplemented opcode");
+                                if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
 
                             case WasmPrefixedOpcode_memory_init:
                                 (void)InputStream_readLeb128_u32(&in);
                                 (void)InputStream_readByte(&in);
-                                if (unreachable_depth == 0) panic("unimplemented opcode");
+                                if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
 
                             case WasmPrefixedOpcode_data_drop:
                                 (void)InputStream_readLeb128_u32(&in);
-                                if (unreachable_depth == 0) panic("unimplemented opcode");
+                                if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
 
                             case WasmPrefixedOpcode_memory_copy: {
                                 uint32_t dst_mem_idx = InputStream_readLeb128_u32(&in);
@@ -2560,28 +2573,28 @@ subsection_start:;
                             case WasmPrefixedOpcode_table_init:
                                 (void)InputStream_readLeb128_u32(&in);
                                 (void)InputStream_readLeb128_u32(&in);
-                                if (unreachable_depth == 0) panic("unimplemented opcode");
+                                if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
 
                             case WasmPrefixedOpcode_elem_drop:
                                 (void)InputStream_readLeb128_u32(&in);
-                                if (unreachable_depth == 0) panic("unimplemented opcode");
+                                if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
 
                             case WasmPrefixedOpcode_table_copy:
                                 (void)InputStream_readLeb128_u32(&in);
                                 (void)InputStream_readLeb128_u32(&in);
-                                if (unreachable_depth == 0) panic("unimplemented opcode");
+                                if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
 
                             case WasmPrefixedOpcode_table_grow:
                                 (void)InputStream_readLeb128_u32(&in);
-                                if (unreachable_depth == 0) panic("unimplemented opcode");
+                                if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
 
                             case WasmPrefixedOpcode_table_size:
                                 (void)InputStream_readLeb128_u32(&in);
-                                if (unreachable_depth == 0) panic("unimplemented opcode");
+                                if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
 
                             case WasmPrefixedOpcode_table_fill:
                                 (void)InputStream_readLeb128_u32(&in);
-                                if (unreachable_depth == 0) panic("unimplemented opcode");
+                                if (unreachable_depth == 0) panic(&in, "unimplemented opcode");
                         }
                         break;
 
@@ -2982,7 +2995,7 @@ subsection_start:;
                     FuncGen_indent(&fg, out);
                     fprintf(out, "return l%" PRIu32 ";\n", FuncGen_stackPop(&fg));
                     break;
-                default: panic("multiple function returns not supported");
+                default: panic(&in, "multiple function returns not supported");
             }
             fputs("}\n\n", out);
         }
@@ -2993,10 +3006,10 @@ subsection_start:;
         uint32_t len = InputStream_readLeb128_u32(&in);
         fputs("static void init_data(void) {\n", out);
         for (uint32_t i = 0; i < mems_len; i += 1)
-            fprintf(out, "    p%" PRIu32 " = UINT32_C(%" PRIu32 ");\n"
+            fprintf(out, "    p%" PRIu32 " = UINT%d_C(%" PRIu64 ");\n"	// WAHE edit
                     "    c%" PRIu32 " = p%" PRIu32 ";\n"
                     "    m%" PRIu32 " = calloc(c%" PRIu32 ", UINT32_C(1) << 16);\n",
-                    i, mems[i].limits.min, i, i, i, i);
+                    i, mems[i].limits.bits, mems[i].limits.min, i, i, i, i);
         for (uint32_t segment_i = 0; segment_i < len; segment_i += 1) {
             uint32_t mem_idx;
             switch (InputStream_readLeb128_u32(&in)) {
@@ -3008,7 +3021,7 @@ subsection_start:;
                     mem_idx = InputStream_readLeb128_u32(&in);
                     break;
 
-                default: panic("unsupported data kind");
+                default: panic(&in, "unsupported data kind");
             }
             uint32_t offset = evalExpr(&in);
             uint32_t segment_len = InputStream_readLeb128_u32(&in);

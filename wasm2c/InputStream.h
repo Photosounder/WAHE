@@ -1,24 +1,19 @@
 #ifndef INPUT_STREAM_H
 #define INPUT_STREAM_H
 
-#include "panic.h"
 #include "wasm.h"
 
-#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
-
-struct InputStream {
-    FILE *stream;
-};
+#define assert(x) { if (x==0) panic(self, "%s():%d, %s not true", __func__, __LINE__, #x); }	// WAHE edit
 
 static void InputStream_open(struct InputStream *self, const char *path) {
     self->stream = fopen(path, "rb");
-    if (self->stream == NULL) panic("unable to open input file");
+    if (self->stream == NULL) panic(self, "unable to open input file");
 }
 
 static void InputStream_close(struct InputStream *self) {
@@ -36,7 +31,7 @@ static uint8_t InputStream_readByte(struct InputStream *self) {
     if (value == EOF)
     {
 	    fprintf(stderr, "At file pos %lx: ", ftell(self->stream));
-	    panic("unexpected end of input stream");
+	    panic(self, "unexpected end of input stream");
     }
     //- WAHE edit
     return value;
@@ -84,7 +79,7 @@ static uint32_t InputStream_readLeb128_u32(struct InputStream *self) {
     uint8_t byte;
     do {
         byte = InputStream_readByte(self);
-        assert(shift < 32);
+        assert(shift < 64);	// WAHE edit
         value |= (uint32_t)(byte & 0x7F) << shift;
         shift += 7;
     } while (byte & 0x80);
@@ -141,14 +136,14 @@ static int64_t InputStream_readLeb128_i64(struct InputStream *self) {
 static char *InputStream_readName(struct InputStream *self) {
     uint32_t len = InputStream_readLeb128_u32(self);
     char *name = malloc(len + 1);
-    if (name == NULL) panic("out of memory");
-    if (fread(name, 1, len, self->stream) != len) panic("unexpected end of input stream");
+    if (name == NULL) panic(self, "out of memory");
+    if (fread(name, 1, len, self->stream) != len) panic(self, "unexpected end of input stream");
     name[len] = 0;
     return name;
 }
 
 static void InputStream_skipBytes(struct InputStream *self, size_t len) {
-    if (fseek(self->stream, len, SEEK_CUR) == -1) panic("unexpected end of input stream");
+    if (fseek(self->stream, len, SEEK_CUR) == -1) panic(self, "unexpected end of input stream");
 }
 
 static uint32_t InputStream_skipToSection(struct InputStream *self, uint8_t expected_id) {
@@ -171,7 +166,7 @@ struct ResultType {
 static struct ResultType *InputStream_readResultType(struct InputStream *self) {
     uint32_t len = InputStream_readLeb128_u32(self);
     struct ResultType *result_type = malloc(offsetof(struct ResultType, types) + sizeof(int8_t) * len);
-    if (result_type == NULL) panic("out of memory");
+    if (result_type == NULL) panic(self, "out of memory");
     result_type->len = len;
     for (uint32_t i = 0; i < len; i += 1) {
         int64_t val_type = InputStream_readLeb128_i64(self);
@@ -180,7 +175,7 @@ static struct ResultType *InputStream_readResultType(struct InputStream *self) {
             case WasmValType_f32: case WasmValType_f64:
                 break;
 
-            default: panic("unsupported valtype");
+            default: panic(self, "unsupported val_type %lld", val_type);	// WAHE edit
         }
         result_type->types[i] = val_type;
     }
@@ -188,17 +183,22 @@ static struct ResultType *InputStream_readResultType(struct InputStream *self) {
 }
 
 struct Limits {
-    uint32_t min;
-    uint32_t max;
+    uint64_t min, max;	// WAHE edit
+    int bits;	// WAHE edit
 };
 static struct Limits InputStream_readLimits(struct InputStream *self) {
     struct Limits limits;
     uint8_t kind = InputStream_readByte(self);
-    limits.min = InputStream_readLeb128_u32(self);
+    limits.min = InputStream_readLeb128_u64(self);	// WAHE edit
+    limits.bits = kind < 0x04 ? 32 : 64;		// WAHE edit
     switch (kind) {
         case 0x00: limits.max = UINT32_MAX; break;
         case 0x01: limits.max = InputStream_readLeb128_u32(self); break;
-        default: panic("unsupported limit kind");
+	//+ WAHE edit
+        case 0x04: limits.max = UINT64_MAX; break;
+        case 0x05: limits.max = InputStream_readLeb128_u64(self); break;
+        default: panic(self, "unsupported limit kind %d", kind);
+	//- WAHE edit
     }
     return limits;
 }

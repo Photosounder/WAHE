@@ -15,6 +15,8 @@ Modifications:
 - Functions have a comment added that shows its original position in the .wasm file which helps with debugging because each function can be identified using the original module's `.map` file. For example: `static double f43_get_time_hr(void) {	// source pos 77de` which matches the `.map` file entry that reads `-     77da       7b                 get_time_hr`.
 - Every line of code is followed by a comment showing where it ended in the source binary, for instance: `l149 = simd_f64x2_sub(l149, l150);    // ends at 19b7`.
 - The section skipping starts by rewinding the file pointer so that sections can be read out of order.
+- Memory64 support.
+- Improved error reporting.
 
 === Compilation and usage
 
