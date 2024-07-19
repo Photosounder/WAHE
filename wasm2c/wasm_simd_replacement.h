@@ -190,27 +190,30 @@ v128_t simd_i16x8_extend_low_i8x16_s(v128_t a)  { for (int i=7; i>=0; i--) a.i16
 v128_t simd_i16x8_extend_high_i8x16_s(v128_t a) { for (int i=7; i>=0; i--) a.i16[i] = a.i8[i+8]; return a; }
 v128_t simd_i16x8_extend_low_i8x16_u(v128_t a)  { for (int i=7; i>=0; i--) a.u16[i] = a.u8[i];   return a; }
 v128_t simd_i16x8_extend_high_i8x16_u(v128_t a) { for (int i=7; i>=0; i--) a.u16[i] = a.u8[i+8]; return a; }
+v128_t simd_i16x8_shl(v128_t a, uint32_t s)   { s &= 15; for (int i=0; i<8; i++) a.u16[i] <<= s; return a; }
+v128_t simd_i16x8_shr_s(v128_t a, uint32_t s) { s &= 15; for (int i=0; i<8; i++) a.i16[i] >>= s; return a; }
+v128_t simd_i16x8_shr_u(v128_t a, uint32_t s) { s &= 15; for (int i=0; i<8; i++) a.u16[i] >>= s; return a; }
+v128_t simd_i16x8_add(v128_t a, v128_t b) { for (int i=0; i<8; i++) a.i16[i] += b.i16[i]; return a; }
 /* TODO
-simd_i16x8_shl
-simd_i16x8_shr_s
-simd_i16x8_shr_u
-simd_i16x8_add
 simd_i16x8_add_sat_s
-simd_i16x8_add_sat_u
-simd_i16x8_sub
+simd_i16x8_add_sat_u*/
+v128_t simd_i16x8_sub(v128_t a, v128_t b) { for (int i=0; i<8; i++) a.i16[i] -= b.i16[i]; return a; }
+/* TODO
 simd_i16x8_sub_sat_s
-simd_i16x8_sub_sat_u
-simd_i16x8_mul
-simd_i16x8_min_s
-simd_i16x8_min_u
-simd_i16x8_max_s
-simd_i16x8_max_u
+simd_i16x8_sub_sat_u*/
+v128_t simd_i16x8_mul  (v128_t a, v128_t b) { for (int i=0; i<8; i++) a.i16[i] *= b.i16[i]; return a; }
+v128_t simd_i16x8_min_s(v128_t a, v128_t b) { for (int i=0; i<8; i++) if (a.i16[i] > b.i16[i]) a.i16[i] = b.i16[i]; return a; }
+v128_t simd_i16x8_min_u(v128_t a, v128_t b) { for (int i=0; i<8; i++) if (a.u16[i] > b.u16[i]) a.u16[i] = b.u16[i]; return a; }
+v128_t simd_i16x8_max_s(v128_t a, v128_t b) { for (int i=0; i<8; i++) if (a.i16[i] < b.i16[i]) a.i16[i] = b.i16[i]; return a; }
+v128_t simd_i16x8_max_u(v128_t a, v128_t b) { for (int i=0; i<8; i++) if (a.u16[i] < b.u16[i]) a.u16[i] = b.u16[i]; return a; }
+/* TODO
 simd_i16x8_avgr_u
 simd_i16x8_extmul_low_i8x16_s
 simd_i16x8_extmul_high_i8x16_s
 simd_i16x8_extmul_low_i8x16_u
 simd_i16x8_extmul_high_i8x16_u
 */
+
 v128_t simd_i32x4_abs(v128_t a) { for (int i=0; i<4; i++) a.i32[i] = abs(a.i32[i]); return a; }
 v128_t simd_i32x4_neg(v128_t a) { for (int i=0; i<4; i++) a.i32[i] = -a.i32[i]; return a; }
 int32_t simd_i32x4_all_true(v128_t a) { for (int i=0; i<4; i++) if (a.u32[i] == 0) return 0; return 1; }
@@ -254,8 +257,6 @@ v128_t simd_i64x2_shr_u(v128_t a, uint32_t s) { s &= 63; for (int i=0; i<2; i++)
 v128_t simd_i64x2_add(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] += b.i64[i]; return a; }
 v128_t simd_i64x2_sub(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] -= b.i64[i]; return a; }
 v128_t simd_i64x2_mul(v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] *= b.i64[i]; return a; }
-
-
 
 v128_t simd_i64x2_eq  (v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(a.u64[i] == b.u64[i]); return a; }
 v128_t simd_i64x2_ne  (v128_t a, v128_t b) { for (int i=0; i<2; i++) a.i64[i] = -(a.u64[i] != b.u64[i]); return a; }
