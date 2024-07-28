@@ -536,7 +536,7 @@ void wahe_register_commands(wahe_module_t *ctx, char *list)
 
 	for (il = 0; il < linecount; il++)
 	{
-		// TODO check for conflicts
+		// Blindly add command to register, even if it's already been registered
 		alloc_enough(&group->cmd_reg, group->cmd_reg_count+=1, &group->cmd_reg_as, sizeof(wahe_cmd_reg_t), 1.2);
 
 		wahe_cmd_reg_t *reg = &group->cmd_reg[group->cmd_reg_count-1];
@@ -1003,7 +1003,7 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 
 		// Go through every registered command to find a match
 		for (int i = group->cmd_reg_count-1; i >= 0; i--)
-			if (group->cmd_reg[i].hash == msg_hash[ group->cmd_reg[i].word_count-1 ])
+			if (group->cmd_reg[i].hash == msg_hash[ group->cmd_reg[i].word_count-1 ] && group->cmd_reg[i].module_id != ctx->module_id)
 			{
 				// Send the command to the module that registered it
 				char *ret_msg = wahe_send_input(&group->module[ group->cmd_reg[i].module_id ], "%s", line);
