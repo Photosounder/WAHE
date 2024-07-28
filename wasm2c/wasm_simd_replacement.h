@@ -135,11 +135,11 @@ simd_v128_load8_lane
 simd_v128_load16_lane
 simd_v128_load32_lane
 simd_v128_load64_lane
-simd_v128_store8_lane
-simd_v128_store16_lane
-simd_v128_store32_lane
-simd_v128_store64_lane
 */
+void simd_v128_store8_lane (uint8_t  *ptr, v128_t val, int lane) { *ptr = val.u8 [lane]; }
+void simd_v128_store16_lane(uint16_t *ptr, v128_t val, int lane) { *ptr = val.u16[lane]; }
+void simd_v128_store32_lane(uint32_t *ptr, v128_t val, int lane) { *ptr = val.u32[lane]; }
+void simd_v128_store64_lane(uint64_t *ptr, v128_t val, int lane) { *ptr = val.u64[lane]; }
 v128_t simd_v128_load32_zero(const uint32_t *ptr) { v128_t r={0}; r.u32[0] = *ptr; return r; }
 v128_t simd_v128_load64_zero(const uint64_t *ptr) { v128_t r={0}; r.u64[0] = *ptr; return r; }
 /* TODO

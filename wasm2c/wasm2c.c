@@ -2615,7 +2615,7 @@ subsection_start:;
 			 32,  64,  64,   8,   8,   8,   8,   8,   8,   8,   8,   8,   8,  16,  16,  16,   // 2_
 			 16,  16,  16,  16,  16,  16,  16,  32,  32,  32,  32,  32,  32,  32,  32,  32,   // 3_
 			 32,  32,  32,  32,  32,  32,  32,  64,  64,  64,  64,  64,  64, 128, 128, 128,   // 4_
-			128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,  32,  64,  32,  64,   // 5_
+			128, 128, 128, 128,   8,  16,  32,  64,   8,  16,  32,  64,  32,  64,  32,  64,   // 5_
 			  8,   8,   8,   8,   8,   8,   8,  32,  32,  32,  32,   8,   8,   8,   8,   8,   // 6_
 			  8,   8,   8,   8,  64,  64,   8,   8,   8,   8,  64,   8,  16,  16,  32,  32,   // 7_
 			 16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,  16,   // 8_
@@ -2631,7 +2631,8 @@ subsection_start:;
 		};
 
 		if (	(WasmSimdOpcode_v128_load <= op && op <= WasmSimdOpcode_v128_store) ||
-			(WasmSimdOpcode_v128_load32_zero <= op && op <= WasmSimdOpcode_v128_load64_zero) )
+			(WasmSimdOpcode_v128_load32_zero <= op && op <= WasmSimdOpcode_v128_load64_zero) ||
+			(WasmSimdOpcode_v128_load8_lane <= op && op <= WasmSimdOpcode_v128_store64_lane) )
 		{
 			align = InputStream_readLeb128_u32(&in);
 			offset = InputStream_readLeb128_u32(&in);
@@ -2951,7 +2952,7 @@ subsection_start:;
 				}
 				break;
 			}
-			
+
 			case WasmSimdOpcode_i8x16_replace_lane:
 			case WasmSimdOpcode_i16x8_replace_lane:
 			case WasmSimdOpcode_i32x4_replace_lane:
@@ -2968,6 +2969,22 @@ subsection_start:;
 					FuncGen_stackPush(&fg, out, WasmValType_v128);
 
 					fprintf(out, "%s(l%u, %u, l%u);\n", simd_func_name(op), lhs, lane, rhs);
+				}
+				break;
+			}
+
+			case WasmSimdOpcode_v128_store8_lane:
+			case WasmSimdOpcode_v128_store16_lane:
+			case WasmSimdOpcode_v128_store32_lane:
+			case WasmSimdOpcode_v128_store64_lane:
+			{
+				uint32_t lane = InputStream_readLeb128_u32(&in);
+				if (unreachable_depth==0)
+				{
+					uint32_t value = FuncGen_stackPop(&fg);
+					uint32_t base = FuncGen_stackPop(&fg);
+					FuncGen_indent(&fg, out);
+					fprintf(out, "%s((uint%u_t *)&m%u[l%u + UINT32_C(%u)], l%u, %u);\n", simd_func_name(op), elem_size[op], 0, base, offset, value, lane);
 				}
 				break;
 			}
