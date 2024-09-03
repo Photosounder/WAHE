@@ -22,4 +22,4 @@ Modifications:
 
 As with the original you can simply compile it by doing `clang wasm2c.c -o wasm2c.exe` and then use it by doing `wasm2c $1.wasm $1_trans.c`.
 
-Then you can compile the transpiled file into a native module for instance by doing this: `clang $1_trans.c -o $1_trans.dll -shared -Os`.
+Then you can compile the transpiled file into a native module for instance by doing this: `clang $1_trans.c -o $1_trans.dll -shared -Os -march=native`.
