@@ -837,7 +837,7 @@ void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int d
 		rect_range_and_dim_to_scale_offset_inv(group->image[display_id].fb_rect, group->image[display_id].fb.dim, &r_scale, &r_offset, 0);
 		xy_t pix_pos = mad_xy(mouse.u, r_scale, r_offset);
 
-if (mouse.b.lmb != -1 || mouse.b.rmb != -1)
+//if (mouse.b.lmb != -1 || mouse.b.rmb != -1)
 		bufprintf(&buf, "Mouse position (pixels) %.16g %.16g\n", pix_pos.x, pix_pos.y);
 	}
 	else if (group->image[display_id].mouse_active)
