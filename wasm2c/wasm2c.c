@@ -613,6 +613,7 @@ int main(int argc, char **argv) {
           "    return dst;\n"
           "}\n"
           "\n"
+	  // TODO make this 64-bit compatible
           "static uint32_t memory_grow(uint8_t **m, uint32_t *p, uint32_t *c, uint32_t n) {\n"
           "    uint8_t *new_m = *m;\n"
           "    uint32_t r = *p;\n"

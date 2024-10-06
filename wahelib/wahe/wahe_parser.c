@@ -47,7 +47,6 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 {
 	// group has to be a pointer with a fixed location so that pointers to it in the struct wouldn't be dereferenced
 	int i, n[4], is, il, linecount;
-	int module_offset = group->module_count;
 	#ifdef H_ROUZICLIB
 	int image_offset = group->image_count;
 	#endif
@@ -55,6 +54,10 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 	wahe_symbol_table_t symb_module={0}, symb_display={0}, symb_order={0};
 	wahe_chain_t *chain = NULL;
 	int init = 0;
+
+	// Re-add already loaded modules to the module symbol list
+	for (is=0; is < group->module_count; is++)
+		wahe_add_symbol_to_table(&symb_module, group->module[is].module_name);
 
 	// Check if group needs to be initialised
 	if (group->chain_count == 0)
@@ -91,7 +94,7 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 			if (wahe_find_symbol_in_table(&symb_module, module_name) != -1)
 				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Module symbol name \"%s\" already taken.\n", filepath, il, module_name);
 
-			is = wahe_add_symbol_to_table(&symb_module, module_name) + module_offset;
+			is = wahe_add_symbol_to_table(&symb_module, module_name);
 
 			// Load module
 			alloc_enough(&group->module, group->module_count = is+1, &group->module_as, sizeof(wahe_module_t), 1.5);
@@ -106,6 +109,37 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 
 			// Store instance name
 			group->module[is].wahe_name = make_string_copy(module_name);
+		}
+
+		// Sync group
+		memset(n, 0, sizeof(n));
+		sscanf(line, "Sync group %n%*[^:]%n: %n%*s%n", &n[0], &n[1], &n[2], &n[3]);
+		if (n[3])
+		{
+			char *p = &line[n[2]];
+			while (p)
+			{
+				// Get module name
+				n[2] = n[3] = 0;
+				sscanf(p, " %n%*s%n", &n[2], &n[3]);
+				if (n[3] == 0)
+					break;
+
+				char *module_name = make_string_copy_len(&p[n[2]], n[3]-n[2]);
+				p = &p[n[3]];
+
+				// Find module
+				is = wahe_find_symbol_in_table(&symb_module, module_name);
+				if (is == -1)
+				{
+					bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Module symbol name \"%s\" not previously defined.\n", filepath, il, module_name);
+					free(module_name);
+					goto end;
+				}
+				else
+					group->module[is].sync_group_name = make_string_copy_len(&line[n[0]], n[1]-n[0]);
+				free(module_name);
+			}
 		}
 
 		// Set display
@@ -145,8 +179,6 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 				free(module_name);
 				goto end;
 			}
-			else
-				is += module_offset;
 			free(module_name);
 
 			// Send lines to the module
@@ -226,7 +258,7 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 				// Set module
 				if (strcmp(attribute, "module") == 0)
 				{
-					chain->exec_order[is].module_id = wahe_find_symbol_in_table(&symb_module, arg_name) + module_offset;
+					chain->exec_order[is].module_id = wahe_find_symbol_in_table(&symb_module, arg_name);
 					if (chain->exec_order[is].module_id == -1)
 						bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Order module attribute \"%s\" not previously defined.\n", filepath, il, arg_name);
 				}
@@ -305,7 +337,7 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 
 			// Find command processing module
 			char *proc_module_name = make_string_copy_len(&line[n[0]], n[1]-n[0]);
-			eo->cmd_proc_id[ip] = wahe_find_symbol_in_table(&symb_module, proc_module_name) + module_offset;
+			eo->cmd_proc_id[ip] = wahe_find_symbol_in_table(&symb_module, proc_module_name);
 			if (eo->cmd_proc_id[ip] == -1)
 			{
 				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Module symbol name \"%s\" not previously defined.\n", filepath, il, proc_module_name);

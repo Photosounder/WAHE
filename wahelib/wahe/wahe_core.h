@@ -31,6 +31,7 @@ typedef struct
 	int valid;
 	char *module_name;
 	char *wahe_name;
+	char *sync_group_name;
 	int module_id;
 	rl_mutex_t mutex;
 	void *parent_group;	// wahe_group_t *

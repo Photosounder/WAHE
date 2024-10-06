@@ -906,6 +906,15 @@ wahe_shared_buffer_t *wahe_add_or_find_shared_buffer(wahe_group_t *group, const 
 	return sb;
 }
 
+char *wahe_make_sync_buffer_name(wahe_module_t *ctx, const char *name, int name_len)
+{
+	// Make name, add context's sync group prefix if present
+	if (ctx->sync_group_name)
+		return sprintf_alloc("%s %.*s", ctx->sync_group_name, name_len, name);
+	else
+		return make_string_copy_len(name, name_len);
+}
+
 // Get called from the module
 size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 {
@@ -1083,10 +1092,11 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		sscanf(line, "Sync %zi bytes at %zi (module %60[^)]) to shared buffer %n%*s%n (offset %zu)", &copy_size, &src_addr, src_module_id, &start, &end, &offset);
 		if (end)
 		{
-			char *name = make_string_copy_len(&line[start], end-start);
+			wahe_module_t *src_ctx = wahe_get_module_by_id_string(src_module_id);
+
+			char *name = wahe_make_sync_buffer_name(src_ctx, &line[start], end-start);
 			wahe_shared_buffer_t *sb = wahe_add_or_find_shared_buffer(group, name);
 			free(name);
-			wahe_module_t *src_ctx = wahe_get_module_by_id_string(src_module_id);
 
 			rl_mutex_lock(&sb->mutex);
 			buf_alloc_enough(&sb->buffer, offset+copy_size);
@@ -1103,10 +1113,11 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		sscanf(line, "Sync shared buffer %n%*s%n to %zi bytes at %zi (module %60[^)])", &start, &end, &orig_size, &dst_addr, dst_module_id);
 		if (dst_module_id[0])
 		{
-			char *name = make_string_copy_len(&line[start], end-start);
+			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
+
+			char *name = wahe_make_sync_buffer_name(dst_ctx, &line[start], end-start);
 			wahe_shared_buffer_t *sb = wahe_add_or_find_shared_buffer(group, name);
 			free(name);
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
 
 			rl_mutex_lock(&sb->mutex);
 			if (sb->buffer.len)
