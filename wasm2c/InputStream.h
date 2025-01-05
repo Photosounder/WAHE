@@ -159,6 +159,47 @@ static uint32_t InputStream_skipToSection(struct InputStream *self, uint8_t expe
     }
 }
 
+//+ WAHE
+static uint32_t InputStream_skipToCustomSection(struct InputStream *self, const char *section_name)
+{
+	// Get size and rewind
+	fseek(self->stream, 0, SEEK_END);
+	long int file_size = ftell(self->stream);
+	fseek(self->stream, 8, SEEK_SET);
+
+	while (1)
+	{
+		int i;
+		uint8_t id = InputStream_readByte(self);
+		uint32_t size = InputStream_readLeb128_u32(self);
+		long int section_start = ftell(self->stream);
+		if (id == WasmSectionId_custom)
+		{
+			// Check name
+			uint32_t len = InputStream_readLeb128_u32(self); // name length
+			uint32_t len2 = strlen(section_name);
+			if (len == len2)
+			{
+				for (i=0; i < len; i++)
+					if (section_name[i] != InputStream_readByte(self))
+						break;
+
+				fseek(self->stream, section_start, SEEK_SET);
+				if (i == len)
+					return size;
+			}
+
+			fseek(self->stream, section_start, SEEK_SET);
+		}
+
+		InputStream_skipBytes(self, size);
+
+		if (ftell(self->stream) == file_size)
+			return 0;
+	}
+}
+//- WAHE
+
 struct ResultType {
     uint32_t len;
     int8_t types[1];

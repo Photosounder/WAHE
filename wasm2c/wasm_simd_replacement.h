@@ -15,6 +15,7 @@ typedef union
 #define uint128_t v128_t
 
 // Reference: https://doc.rust-lang.org/src/core/stdarch/crates/core_arch/src/wasm32/simd128.rs.html
+// https://github.com/WebAssembly/spec/blob/main/proposals/simd/SIMD.md
 
 // Load
 v128_t load128_align0(const uint8_t  *ptr) { v128_t val; memcpy(&val, ptr, sizeof(val)); return val; }
@@ -46,7 +47,7 @@ v128_t V128_C(uint64_t a, uint64_t b) { v128_t r; r.u64[0] = a; r.u64[1] = b; re
 
 // Lane selection
 v128_t simd_i8x16_shuffle(v128_t a, v128_t b, const int8_t *s) { v128_t r; for (int i=0; i<16; i++) r.u8[i] = s[i] < 16 ? a.u8[s[i]] : b.u8[s[i]-16]; return r; }
-v128_t simd_i8x16_swizzle(v128_t a, v128_t b, const int8_t *s) { v128_t r; for (int i=0; i<16; i++) r.u8[i] = s[i] < 16 ? a.u8[s[i]] : 0; return r; }
+v128_t simd_i8x16_swizzle(v128_t a, const int8_t *s) { v128_t r; for (int i=0; i<16; i++) r.u8[i] = s[i] < 16 ? a.u8[s[i]] : 0; return r; }
 
 // Splat
 v128_t simd_i8x16_splat(uint8_t a)  { v128_t r; for (int i=0; i<16; i++) r.u16[i] = a; return r; }
@@ -142,10 +143,8 @@ void simd_v128_store32_lane(uint32_t *ptr, v128_t val, int lane) { *ptr = val.u3
 void simd_v128_store64_lane(uint64_t *ptr, v128_t val, int lane) { *ptr = val.u64[lane]; }
 v128_t simd_v128_load32_zero(const uint32_t *ptr) { v128_t r={0}; r.u32[0] = *ptr; return r; }
 v128_t simd_v128_load64_zero(const uint64_t *ptr) { v128_t r={0}; r.u64[0] = *ptr; return r; }
-/* TODO
-simd_f32x4_demote_f64x2_zero
-simd_f64x2_promote_low_f32x4
-*/
+v128_t simd_f32x4_demote_f64x2_zero(v128_t a) { for (int i=0; i<2; i++) a.f32[i] = a.f64[i]; a.i64[1] = 0; return a; }
+v128_t simd_f64x2_promote_low_f32x4(v128_t a) { for (int i=1; i>=0; i--) a.f64[i] = a.f32[i]; return a; }
 
 // Integer math operations
 int popcount(int x) { int v = 0; while (x != 0) { x &= x - 1; v++; } return v; }

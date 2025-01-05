@@ -768,10 +768,11 @@ int main(int argc, char **argv) {
 		char *name;
 	} func_symb_t;
 
-	size_t func_symb_count;
-	func_symb_t *func_symb;
+	size_t func_symb_count = 0;
+	func_symb_t *func_symb = NULL;
 
-	if (InputStream_skipToSection(&in, WasmSectionId_custom))
+	//if (InputStream_skipToSection(&in, WasmSectionId_custom))
+	if (InputStream_skipToCustomSection(&in, "name"))
 	{
 		uint32_t len = InputStream_readLeb128_u32(&in);
 		char *name = calloc(len+1, sizeof(char));
@@ -816,7 +817,7 @@ subsection_start:;
 					if (entry_id != ie)
 						fprintf(stderr, "Custom section function name IDs not sequential: %d as entry #%d\n", entry_id, ie);
 
-					//printf("\tf%d() = %s()\n", entry_id-imports_len, name);
+					//printf("\tf%d() = %s()\n", entry_id, name);
 					//free(name);
 				}
 				break;
@@ -854,7 +855,7 @@ subsection_start:;
                 case 1: fputs(WasmValType_toC(func_type->result->types[0]), out); break;
                 default: panic(&in, "multiple function returns not supported");
             }
-            fprintf(out, " f%" PRIu32 "_%s(", i, func_symb[i].name);	// WAHE edit
+            fprintf(out, " f%" PRIu32 "_%s(", i+imports_len, func_symb ? func_symb[i].name : "noname");	// WAHE edit
             if (func_type->param->len == 0) fputs("void", out);
             for (uint32_t param_i = 0; param_i < func_type->param->len; param_i += 1) {
                 if (param_i > 0) fputs(", ", out);
@@ -920,7 +921,7 @@ subsection_start:;
                         fprintf(out, "    if (wahe_run_command == wahe_run_command_dummy)\n"
                             "        sscanf((char *) &m0[l0], \"wahe_run_command() = %%zx\", (size_t *) &wahe_run_command);\n");
                     fprintf(out, "    %sf%" PRIu32 "_%s(",
-                            func_type->result->len > 0 ? "return " : "", idx - imports_len, func_symb[idx-imports_len].name);
+                            func_type->result->len > 0 ? "return " : "", idx, func_symb ? func_symb[idx-imports_len].name : "noname");
                     //- WAHE edit
 
                     for (uint32_t param_i = 0; param_i < func_type->param->len; param_i += 1) {
@@ -964,7 +965,7 @@ subsection_start:;
                 if (func_id < imports_len)
                     fprintf(out, "%s_%s", imports[func_id].mod, imports[func_id].name);
                 else
-                    fprintf(out, "f%" PRIu32 "_%s", func_id - imports_len, func_symb[func_id-imports_len].name);	// WAHE edit
+                    fprintf(out, "f%" PRIu32 "_%s", imports_len+func_id - imports_len, func_symb ? func_symb[func_id-imports_len].name : "noname");	// WAHE edit
                 fputs(";\n", out);
             }
         }
@@ -992,7 +993,7 @@ subsection_start:;
                 case 1: fputs(WasmValType_toC(func_type->result->types[0]), out); break;
                 default: panic(&in, "multiple function returns not supported");
             }
-            fprintf(out, " f%" PRIu32 "_%s(", func_i, func_symb[func_i].name);	// WAHE edit
+            fprintf(out, " f%" PRIu32 "_%s(", imports_len+func_i, func_symb ? func_symb[func_i].name : "noname");	// WAHE edit
             if (func_type->param->len == 0) fputs("void", out);
             for (uint32_t param_i = 0; param_i < func_type->param->len; param_i += 1) {
                 param_used[param_i] = false;
@@ -1429,7 +1430,7 @@ subsection_start:;
                                     if (func_id < imports_len)
                                         fprintf(out, "%s_%s", imports[func_id].mod, imports[func_id].name);
                                     else
-                                        fprintf(out, "f%" PRIu32 "_%s", func_id - imports_len, func_symb[func_id-imports_len].name);	// WAHE edit
+                                        fprintf(out, "f%" PRIu32 "_%s", imports_len+func_id - imports_len, func_symb ? func_symb[func_id-imports_len].name : "noname");	// WAHE edit
                                     break;
                                 case WasmOpcode_call_indirect:
                                     fputs("(*(", out);
@@ -2731,6 +2732,8 @@ subsection_start:;
 
 			// 1 arg functions
 			case WasmSimdOpcode_v128_not:
+			case WasmSimdOpcode_f32x4_demote_f64x2_zero:
+			case WasmSimdOpcode_f64x2_promote_low_f32x4:
 			case WasmSimdOpcode_i8x16_abs:
 			case WasmSimdOpcode_i8x16_neg:
 			case WasmSimdOpcode_i8x16_popcnt:
