@@ -239,15 +239,20 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	wahe_get_module_func(ctx, "module_proc_image",    WAHE_FUNC_PROC_IMAGE, 1);
 	wahe_get_module_func(ctx, "module_proc_sound",    WAHE_FUNC_PROC_SOUND, 1);
 
-	// In case the module is wasm-to-native
 	if (ctx->native)
 	{
+		// Send pointers to the host's allocator if it can take them to manage its memory buffer
+		void (*receive_host_allocator)(void *, void *, void *, void *) = dynlib_find_symbol(ctx->native, "receive_host_allocator");
+		if (receive_host_allocator)
+			receive_host_allocator(malloc, calloc, free, realloc);
+
+		// Initialise the memory buffer of a wasm-to-native module
 		ctx->native_memory = (uint8_t ***) wahe_get_module_symbol_address(ctx, "memory", 1);
 		if (ctx->native_memory)
 			call_module_free(ctx, 0);	// Initialises the memory buffer
 	}
 
-	if (ctx->native == 0)
+	if (ctx->native == NULL)
 	{
 		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
 		ctx->data_end = wahe_get_module_symbol_address(ctx, "__data_end", 0);
@@ -1156,7 +1161,7 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		if (dst_module_id[0])
 		{
 			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->native == 0)
+			if (dst_ctx && dst_ctx->native == NULL)
 				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->heap_base);
 			done = 1;
 		}
@@ -1167,7 +1172,7 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		if (dst_module_id[0])
 		{
 			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->native == 0)
+			if (dst_ctx && dst_ctx->native == NULL)
 			{
 				size_t ptr = wahe_get_module_symbol_address(dst_ctx, "__stack_pointer", 0);
 				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ptr);
@@ -1181,7 +1186,7 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		if (dst_module_id[0])
 		{
 			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->native == 0)
+			if (dst_ctx && dst_ctx->native == NULL)
 				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->memory_size);
 			done = 1;
 		}
