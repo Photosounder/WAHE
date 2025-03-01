@@ -57,7 +57,7 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 
 	// Re-add already loaded modules to the module symbol list
 	for (is=0; is < group->module_count; is++)
-		wahe_add_symbol_to_table(&symb_module, group->module[is].module_name);
+		wahe_add_symbol_to_table(&symb_module, make_string_copy(group->module[is].module_name));
 
 	// Check if group needs to be initialised
 	if (group->chain_count == 0)
