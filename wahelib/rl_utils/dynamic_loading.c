@@ -16,6 +16,11 @@ void *dynlib_open(const char *path)
 
 	SetErrorMode(SEM_FAILCRITICALERRORS);
 	void *module = LoadLibraryW(wpath);
+	if (module == NULL)
+	{
+		DWORD dwError = GetLastError();
+		fprintf_rl(stderr, "In dynlib_open(\"%s\"): LoadLibraryW() failed with error code %lu\n", path, dwError);
+	}
 	SetErrorMode(0);
 
 	free(wpath);

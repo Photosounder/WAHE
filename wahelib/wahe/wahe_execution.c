@@ -74,6 +74,7 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 							wahe_copy_between_memories(NULL, (size_t) input_msg, copy_size, dst_module, eo->dst_msg_addr);
 						}
 						break;
+
 					default:
 						break;
 				}

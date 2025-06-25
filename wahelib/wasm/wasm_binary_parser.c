@@ -1,5 +1,19 @@
 // https://webassembly.github.io/spec/core/binary/modules.html
 
+int check_if_file_is_wasm(const char *path)
+{
+	char buffer[4] = {0};
+	const char sig[4] = {'\0', 'a', 's', 'm'};
+
+	FILE *file = fopen_utf8(path, "rb");
+	if (file == NULL)
+		return 0;
+
+	fread(buffer, 1, sizeof(buffer), file);
+
+	return memcmp(sig, buffer, sizeof(buffer)) == 0;
+}
+
 size_t wasmbin_jump_to_section(FILE *file, uint8_t section_id)
 {
 	// Get file size then rewind

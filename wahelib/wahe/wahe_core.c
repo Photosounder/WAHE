@@ -567,15 +567,8 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	ctx->parent_group = parent_group;
 	ctx->module_id = module_index;
 
-	// Native module
-	if ((ctx->native = dynlib_open(path)))
-	{
-		// Find functions from the native module
-		wahe_init_all_module_symbols(ctx);
-		ctx->valid = 1;
-	}
 	// WASM module
-	else
+	if (check_if_file_is_wasm(path))
 	{
 		#ifdef WAHE_WASMTIME
 		// Load WASM file
@@ -674,6 +667,13 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		fprintf_rl(stderr, "Cannot initiate WASM module %s when WAHE is compiled without WASM support\n", ctx->module_name);
 		return;
 		#endif // WAHE_WASMTIME
+	}
+	// Native module
+	else if ((ctx->native = dynlib_open(path)))
+	{
+		// Find functions from the native module
+		wahe_init_all_module_symbols(ctx);
+		ctx->valid = 1;
 	}
 
 	// Send module ID to the module, it's intended to keep changing in the future on the host side without changes in modules, so modules should just store the ID in a char[61]
