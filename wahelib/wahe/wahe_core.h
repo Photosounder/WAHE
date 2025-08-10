@@ -53,12 +53,13 @@ typedef struct
 	wasmtime_valkind_t address_type;
 	wasmtime_func_t func[WAHE_FUNC_COUNT];
 	#endif // WAHE_WASMTIME
-	size_t stack_base, data_end, heap_base, memory_size, cita_time_addr;
+	size_t stack_base, data_end, heap_base, memory_size, *memory_size_addr, cita_time_addr;
+	int8_t memory_bits;
 	uint32_t page_count_initial, page_count_max;
 
 	// Specific to native modules
 	void *native, *dl_func[WAHE_FUNC_COUNT];
-	uint8_t ***native_memory;	// specific to wasm-to-native
+	uint8_t **native_memory;	// specific to wasm-to-native
 } wahe_module_t;
 
 #ifdef H_ROUZICLIB

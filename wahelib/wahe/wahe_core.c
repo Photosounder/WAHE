@@ -112,7 +112,9 @@ int wahe_get_module_memory(wahe_module_t *ctx)
 	if (ctx->native)
 	{
 		if (ctx->native_memory)
-			ctx->memory_ptr = **ctx->native_memory;
+			ctx->memory_ptr = *ctx->native_memory;
+		if (ctx->memory_size_addr)
+			ctx->memory_size = *ctx->memory_size_addr;
 		return 1;
 	}
 
@@ -247,12 +249,32 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 			receive_host_allocator(malloc, calloc, free, realloc);
 
 		// Initialise the memory buffer of a wasm-to-native module
-		ctx->native_memory = (uint8_t ***) wahe_get_module_symbol_address(ctx, "memory", 1);
+		ctx->native_memory = (uint8_t **) wahe_get_module_symbol_address(ctx, "mem0", 0);
 		if (ctx->native_memory)
 			call_module_free(ctx, 0);	// Initialises the memory buffer
-	}
 
-	if (ctx->native == NULL)
+		// Find the globals
+		size_t addr = wahe_get_module_symbol_address(ctx, "memory_bits", 0);
+		if (addr)
+		{
+			ctx->memory_bits = *(int8_t *) addr;
+
+			addr = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
+			if (addr)
+				ctx->heap_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
+
+			addr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
+			if (addr)
+				ctx->stack_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
+
+			addr = wahe_get_module_symbol_address(ctx, "__data_end", 0);
+			if (addr)
+				ctx->data_end = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
+
+			ctx->memory_size_addr = (size_t *) wahe_get_module_symbol_address(ctx, "mem0_size", 0);
+		}
+	}
+	else
 	{
 		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
 		ctx->data_end = wahe_get_module_symbol_address(ctx, "__data_end", 0);
@@ -865,6 +887,10 @@ void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int d
 			bufprintf(&buf, "Mouse %s button %s\n", b_name[i], state_name[2 + b]);
 	}
 
+	// Mouse wheel
+	if (mouse.b.wheel)
+		bufprintf(&buf, "Mouse scroll %s %d\n", mouse.b.wheel < 0 ? "down" : "up", abs(mouse.b.wheel));
+
 	// Copy message from host memory to module memory
 	size_t *addr = &chain->exec_order[ chain->connection[conn_id].dst_eo ].dst_msg_addr;
 	call_module_free(&group->module[module_id], *addr);
@@ -1155,14 +1181,55 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			done = 1;
 		}
 
-		// Heap base address in a WASM module
+		// Host address of pointer to the memory of a WASM/transpiled module
+		dst_module_id[0] = '\0';
+		sscanf(line, "Get memory pointer address of module ID %60s", dst_module_id);
+		if (dst_module_id[0])
+		{
+			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
+			if (dst_ctx)
+			{
+				size_t memory_ptr = 0;
+				if (dst_ctx->native_memory)
+					memory_ptr = (size_t) dst_ctx->native_memory;
+				else
+					memory_ptr = (size_t) &dst_ctx->memory_ptr;
+
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", memory_ptr);
+			}
+			done = 1;
+		}
+
+		// Heap base address in a WASM/transpiled module
 		dst_module_id[0] = '\0';
 		sscanf(line, "Get heap base of module ID %60s", dst_module_id);
 		if (dst_module_id[0])
 		{
 			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->native == NULL)
+			if (dst_ctx && dst_ctx->heap_base)
 				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->heap_base);
+			done = 1;
+		}
+
+		// Data end address in a WASM/transpiled module
+		dst_module_id[0] = '\0';
+		sscanf(line, "Get data end of module ID %60s", dst_module_id);
+		if (dst_module_id[0])
+		{
+			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
+			if (dst_ctx && dst_ctx->data_end)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->data_end);
+			done = 1;
+		}
+
+		// Stack base in a WASM/transpiled module
+		dst_module_id[0] = '\0';
+		sscanf(line, "Get stack base of module ID %60s", dst_module_id);
+		if (dst_module_id[0])
+		{
+			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
+			if (dst_ctx && dst_ctx->stack_base)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->stack_base);
 			done = 1;
 		}
 
@@ -1180,14 +1247,25 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			done = 1;
 		}
 
-		// Memory size of a WASM module
+		// Memory size of a WASM/transpiled module
 		dst_module_id[0] = '\0';
 		sscanf(line, "Get memory size of module ID %60s", dst_module_id);
 		if (dst_module_id[0])
 		{
 			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->native == NULL)
+			if (dst_ctx)
 				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->memory_size);
+			done = 1;
+		}
+
+		// Memory size address of a WASM/transpiled module
+		dst_module_id[0] = '\0';
+		sscanf(line, "Get memory size address of module ID %60s", dst_module_id);
+		if (dst_module_id[0])
+		{
+			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
+			if (dst_ctx && dst_ctx->memory_size_addr)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) dst_ctx->memory_size_addr);
 			done = 1;
 		}
 
