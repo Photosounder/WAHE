@@ -264,6 +264,7 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 				ctx->heap_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
 
 			addr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
+			ctx->stack_ptr_addr = (size_t *) addr;
 			if (addr)
 				ctx->stack_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
 
@@ -1195,8 +1196,20 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 				else
 					memory_ptr = (size_t) &dst_ctx->memory_ptr;
 
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", memory_ptr);
+				if (memory_ptr)
+					return_msg_addr = module_sprintf_alloc(ctx, "%#zx", memory_ptr);
 			}
+			done = 1;
+		}
+
+		// Host address of the stack pointer of a transpiled module
+		dst_module_id[0] = '\0';
+		sscanf(line, "Get stack pointer address of module ID %60s", dst_module_id);
+		if (dst_module_id[0])
+		{
+			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
+			if (dst_ctx && dst_ctx->stack_ptr_addr)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) dst_ctx->stack_ptr_addr);
 			done = 1;
 		}
 
