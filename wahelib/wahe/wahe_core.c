@@ -279,6 +279,7 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	{
 		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
 		ctx->data_end = wahe_get_module_symbol_address(ctx, "__data_end", 0);
+		ctx->memory_size_addr = &ctx->memory_size;
 	}
 }
 
@@ -751,6 +752,20 @@ wahe_module_t *wahe_get_module_by_id_string(const char *id_string)
 	}
 
 	return NULL;
+}
+
+void *wahe_get_pointer_to_addr_by_module_id(const char *module_id, size_t addr)
+{
+	wahe_module_t *module_ctx = wahe_get_module_by_id_string(module_id);
+
+	if (module_ctx == NULL)
+		return (void *) addr;
+
+	if (module_ctx && module_ctx->valid == 0)
+		return NULL;
+
+	wahe_get_module_memory(module_ctx);
+	return &module_ctx->memory_ptr[addr];
 }
 
 void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr)
@@ -1292,8 +1307,27 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			char *path = make_string_copy_len(&line[start], end-start);
 			data_addr = wahe_load_raw_file(ctx, path, &data_size);
 			free(path);
-			return_msg_addr = module_sprintf_alloc(ctx, "Data location: %zi bytes at %#zx", data_size, (void *) data_addr);
+			return_msg_addr = module_sprintf_alloc(ctx, "Data location: %zu bytes at %#zx", data_size, (void *) data_addr);
 			done = 1;
+		}
+
+		// Save raw file TODO: move to OS Basics module
+		start = end = 0;
+		src_module_id[0] = '\0';
+		size_t data_addr = 0, data_size = 0;
+		sscanf(line, "Save raw file to path %n%*[^\n]%n\nData location: %zi bytes at %zi (module %60[^)])", &start, &end, &data_size, &data_addr, src_module_id);
+		if (data_addr)
+		{
+			// TODO handle paths relative to the .wahe file better
+			char *path = make_string_copy_len(&line[start], end-start);
+			int ret = save_raw_file(path, "wb", wahe_get_pointer_to_addr_by_module_id(src_module_id, data_addr), data_size);
+			if (ret == 0)
+				return_msg_addr = module_sprintf_alloc(ctx, "Error: Couldn't write to file %s", path);
+			else
+				return_msg_addr = module_sprintf_alloc(ctx, "Done.");
+			free(path);
+			done = 1;
+			line = strstr_after(line, "\n");
 		}
 
 		// Return raw time TODO: move to OS Basics module
