@@ -684,7 +684,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 
 		// Print details
 		fprintf_rl(stdout, "Stack base %#zx, heap base %#zx, data end %#zx\n", ctx->stack_base, ctx->heap_base, ctx->data_end);
-		fprintf_rl(stdout, "Initial memory %zu kB, max memory %zu kB\n", ctx->page_count_initial*64ULL, ctx->page_count_max*64ULL);
+		fprintf_rl(stdout, "Initial memory %" PRIu64 " kB, max memory %" PRIu64 " kB\n", (uint64_t) (ctx->page_count_initial*64ULL), (uint64_t) (ctx->page_count_max*64ULL));
 
 		#else
 		ctx->valid = 0;
@@ -880,8 +880,11 @@ void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int d
 		rect_range_and_dim_to_scale_offset_inv(group->image[display_id].fb_rect, group->image[display_id].fb.dim, &r_scale, &r_offset, 0);
 		xy_t pix_pos = mad_xy(mouse.u, r_scale, r_offset);
 
-//if (mouse.b.lmb != -1 || mouse.b.rmb != -1)
+//if (mouse.b.lmb != -1 || mouse.b.rmb != -1)	// use this to simulate a touchscreen
 		bufprintf(&buf, "Mouse position (pixels) %.16g %.16g\n", pix_pos.x, pix_pos.y);
+
+		// Mouse delta
+		bufprintf(&buf, "Mouse delta %.16g %.16g\n", mouse.d.x, mouse.d.y);
 	}
 	else if (group->image[display_id].mouse_active)
 		bufprintf(&buf, "Mouse position (pixels) NAN NAN\n");
@@ -1338,6 +1341,27 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			return_msg_addr = module_sprintf_alloc(ctx, "Raw time %.17g seconds", get_time_hr());
 			done = 1;
 		}
+
+		// Mouse warp
+		#ifdef H_ROUZICLIB
+		n = 0;
+		sscanf(line, "Mouse capture%n", &n);
+		if (n)
+		{
+			mouse.b.orig = zc.offset_u;
+			mouse.warp_if_move = 1;
+			done = 1;
+		}
+
+		n = 0;
+		sscanf(line, "Mouse release%n", &n);
+		if (n)
+		{
+			mouse.b.orig = zc.offset_u;
+			mouse.warp_if_move = 0;
+			done = 1;
+		}
+		#endif
 
 		// Benchmark return
 		n = 0;

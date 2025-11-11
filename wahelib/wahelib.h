@@ -16,8 +16,15 @@ extern "C" {
     #ifndef fprintf_rl
       #define fprintf_rl fprintf
     #endif
-    #include "rl_utils/windows_includes.h"
-    #include "rl_utils/dirent.h"
+    #ifdef _WIN32
+      #include "rl_utils/windows_includes.h"
+      #include "rl_utils/dirent.h"
+    #else
+      #include <sys/stat.h>	// for mkdir()
+      #ifndef MAX_PATH
+        #define MAX_PATH 4096
+      #endif
+    #endif
     #include "rl_utils/misc.h"
     #include "rl_utils/threading.h"
     #include "rl_utils/generic_buffer.h"
