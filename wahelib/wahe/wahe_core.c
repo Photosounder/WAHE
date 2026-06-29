@@ -1074,6 +1074,40 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			}
 		//**                         **
 
+		// Shrink native module memory
+		size_t shrink_size = 0;
+		n = 0;
+		sscanf(line, "Shrink memory to %zu bytes%n", &shrink_size, &n);
+		if (n)
+		{
+			// Reallocate memory only for native modules that expose host-managed memory
+			if (ctx->native && ctx->native_memory)
+			{
+				wahe_get_module_memory(ctx);
+
+				// Keep the operation shrink-only
+				if (ctx->memory_ptr && shrink_size <= ctx->memory_size)
+				{
+					uint8_t *memory = realloc(ctx->memory_ptr, shrink_size);
+
+					// Publish the resized memory pointer and size
+					if (memory || shrink_size == 0)
+					{
+						ctx->memory_ptr = memory;
+						ctx->memory_size = shrink_size;
+
+						*ctx->native_memory = memory;
+						if (ctx->memory_size_addr)
+							*ctx->memory_size_addr = shrink_size;
+					}
+					else
+						fprintf_rl(stderr, "Shrinking memory of module %s to %zu bytes failed in realloc()\n", ctx->module_name, shrink_size);
+				}
+			}
+
+			done = 1;
+		}
+
 		// Run chain
 		n = start = end = 0;
 		sscanf(line, "Run chain %n%*[^\n]%n\n%n", &start, &end, &n);
