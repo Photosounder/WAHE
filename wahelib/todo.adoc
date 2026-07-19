@@ -1,0 +1,15 @@
+= TODO
+
+== Multi-threading
+
+We need to be able to run functions from different threads for one transpiled module. Creating a thread from a module should work like this:
+
+* The module runs a command like `In another thread run <identifier of function to run> with data pointer <hex data pointer>` with perhaps the option to set the stack size like `and a stack size of 1000 bytes`.
+
+* WAHElib creates a thread, in it it allocates the stack for this thread in the heap, sets the thread-local stack pointer to the end of this stack.
+
+* WAHElib calls the module's `module_message_input()` with a message like `Run <identifier of function to run> with data pointer <hex data pointer>`.
+
+* The module knows how to interpret the function's identifier because it created it, it could be a name, a function address or anything else.
+
+* When the module returns from `module_message_input()`, WAHElib can free the thread's stack.
