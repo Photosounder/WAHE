@@ -100,7 +100,7 @@ typedef struct
 	// Command processors
 	// If type is WAHE_EO_MODULE_FUNC the function can call wahe_run_command()
 	// A cascade of module_proc_cmd() functions can filter the commands and their return messages
-	int *cmd_proc_id;	// module ID for the command processor
+	int *cmd_proc_id;	// Module index for the command processor
 	size_t cmd_proc_count, cmd_proc_as;
 } wahe_exec_order_t;
 

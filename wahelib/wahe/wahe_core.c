@@ -700,10 +700,6 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		ctx->valid = 1;
 	}
 
-	// Send module ID to the module, it's intended to keep changing in the future on the host side without changes in modules, so modules should just store the ID in a char[61]
-	if (parent_group)
-		wahe_send_input(ctx, "Module ID 0x%" PRIx64 "->%d", parent_group, module_index);
-
 	// Send pointer to wahe_run_command() if the module is not WASM
 	if (ctx->native)
 		wahe_send_input(ctx, "wahe_run_command() = %#zx", wahe_run_command_native);
@@ -731,43 +727,6 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	#endif
 }
 
-wahe_module_t *wahe_get_module_by_id_string(const char *id_string)
-{
-	size_t group_addr;
-	int module_index;
-
-	// Module ID is made of the group's address in host memory plus the module's index
-	if (sscanf(id_string, "%zx->%d", &group_addr, &module_index) == 2)
-	{
-		wahe_group_t *group = (wahe_group_t *) group_addr;
-		if (module_index >= group->module_count)
-			return NULL;
-
-		wahe_module_t *ctx = &group->module[module_index];
-
-		if (ctx->parent_group != group)
-			fprintf_rl(stderr, "Module ID \"%s\" points to a bogus group address.\n", id_string);
-
-		return ctx;
-	}
-
-	return NULL;
-}
-
-void *wahe_get_pointer_to_addr_by_module_id(const char *module_id, size_t addr)
-{
-	wahe_module_t *module_ctx = wahe_get_module_by_id_string(module_id);
-
-	if (module_ctx == NULL)
-		return (void *) addr;
-
-	if (module_ctx && module_ctx->valid == 0)
-		return NULL;
-
-	wahe_get_module_memory(module_ctx);
-	return &module_ctx->memory_ptr[addr];
-}
-
 void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr)
 {
 	if (src_module && src_module->valid == 0)
@@ -783,7 +742,7 @@ void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size
 	// TODO Check boundaries
 
 	// Copy
-	memcpy(dst_module ? &dst_module->memory_ptr[dst_addr] : (void *) dst_addr, src_module ? &src_module->memory_ptr[src_addr] : (void *) src_addr, copy_size);
+	memmove(dst_module ? &dst_module->memory_ptr[dst_addr] : (void *) dst_addr, src_module ? &src_module->memory_ptr[src_addr] : (void *) src_addr, copy_size);
 }
 
 size_t wahe_load_raw_file(wahe_module_t *ctx, const char *path, size_t *size)
@@ -970,7 +929,7 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 {
 	wahe_group_t *group = NULL;
 	size_t return_msg_addr = 0;
-	int i, n, start, end;
+	int n, start, end;
 
 	if (message == NULL)
 		return 0;
@@ -985,8 +944,8 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		wahe_exec_order_t *eo = &chain->exec_order[chain->current_eo];
 		if (eo && eo->cmd_proc_id && chain->current_cmd_proc_id < eo->cmd_proc_count && eo->module_id == ctx->module_id)
 		{
-			int dst_module_id = eo->cmd_proc_id[chain->current_cmd_proc_id];
-			wahe_module_t *dst_module = &group->module[dst_module_id];
+			int dst_module_index = eo->cmd_proc_id[chain->current_cmd_proc_id];
+			wahe_module_t *dst_module = &group->module[dst_module_index];
 
 			// Copy message to cmd processing module
 			size_t len = strlen(message) + 1;
@@ -1023,23 +982,10 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 	{
 		int done = 0;
 
-		// Identify calling module and its group
-		start = end = 0;
-		sscanf(line, "From module ID %n%*[^\n]%n", &start, &end);
-		if (end)
-		{
-			ctx = wahe_get_module_by_id_string(&line[start]);
-			if (ctx)
-			{
-				group = ctx->parent_group;
-				done = 1;
-			}
-		}
-
-		// Skip parsing the line if the module hasn't been identified yet
+		// Skip parsing if the callback did not identify its calling module
 		if (group == NULL || ctx == NULL)
 		{
-			fprintf_rl(stderr, "Module calling wahe_run_command() unidentified, run the command 'From module ID <module_id>' first.\n");
+			fprintf_rl(stderr, "Module calling wahe_run_command() is unidentified.\n");
 			goto loop_end;
 		}
 
@@ -1142,50 +1088,29 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		}
 
 		// Copy buffer between memories
-		char src_module_id[61], dst_module_id[61];
 		size_t src_addr, copy_size, dst_addr;
-		if (sscanf(line, "Copy %zi bytes at %zi (module %60[^)]) to %zi (module %60[^)])", &copy_size, &src_addr, src_module_id, &dst_addr, dst_module_id) == 5)
+		n = 0;
+		sscanf(line, "Copy %zi bytes at %zi to %zi%n", &copy_size, &src_addr, &dst_addr, &n);
+		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *src_ctx = wahe_get_module_by_id_string(src_module_id);
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-
-			if (src_ctx && dst_ctx)
-			{
-				wahe_copy_between_memories(src_ctx, src_addr, copy_size, dst_ctx, dst_addr);
-				done = 1;
-			}
-		}
-
-		// Copy buffer between memories with allocation of destination
-		if (sscanf(line, "Copy %zi bytes at %zi (module %60[^)]) to module %60[^)]", &copy_size, &src_addr, src_module_id, dst_module_id) == 4)
-		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-
-			if (dst_ctx)
-			{
-				dst_addr = call_module_malloc(dst_ctx, copy_size);
-				wahe_copy_between_memories(wahe_get_module_by_id_string(src_module_id), src_addr, copy_size, dst_ctx, dst_addr);
-				return_msg_addr = module_sprintf_alloc(ctx, "Destination %#zx", (void *) dst_addr);
-				done = 1;
-			}
+			wahe_copy_between_memories(ctx, src_addr, copy_size, ctx, dst_addr);
+			done = 1;
 		}
 
 		// Sync module buffer to shared buffer
 		start = end = 0;
 		size_t offset = 0;
-		sscanf(line, "Sync %zi bytes at %zi (module %60[^)]) to shared buffer %n%*s%n (offset %zu)", &copy_size, &src_addr, src_module_id, &start, &end, &offset);
+		sscanf(line, "Sync %zi bytes at %zi to shared buffer %n%*s%n (offset %zu)", &copy_size, &src_addr, &start, &end, &offset);
 		if (end)
 		{
-			wahe_module_t *src_ctx = wahe_get_module_by_id_string(src_module_id);
-
-			char *name = wahe_make_sync_buffer_name(src_ctx, &line[start], end-start);
+			char *name = wahe_make_sync_buffer_name(ctx, &line[start], end-start);
 			wahe_shared_buffer_t *sb = wahe_add_or_find_shared_buffer(group, name);
 			free(name);
 
 			rl_mutex_lock(&sb->mutex);
 			buf_alloc_enough(&sb->buffer, offset+copy_size);
 			sb->buffer.len = sb->buffer.as;
-			wahe_copy_between_memories(src_ctx, src_addr, copy_size, NULL, (size_t) &sb->buffer.buf[offset]);
+			wahe_copy_between_memories(ctx, src_addr, copy_size, NULL, (size_t) &sb->buffer.buf[offset]);
 			rl_mutex_unlock(&sb->mutex);
 
 			done = 1;
@@ -1193,13 +1118,11 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 
 		// Sync shared buffer to module buffer
 		size_t orig_size;
-		dst_module_id[0] = '\0';
-		sscanf(line, "Sync shared buffer %n%*s%n to %zi bytes at %zi (module %60[^)])", &start, &end, &orig_size, &dst_addr, dst_module_id);
-		if (dst_module_id[0])
+		n = start = end = 0;
+		sscanf(line, "Sync shared buffer %n%*s%n to %zi bytes at %zi%n", &start, &end, &orig_size, &dst_addr, &n);
+		if (end && n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-
-			char *name = wahe_make_sync_buffer_name(dst_ctx, &line[start], end-start);
+			char *name = wahe_make_sync_buffer_name(ctx, &line[start], end-start);
 			wahe_shared_buffer_t *sb = wahe_add_or_find_shared_buffer(group, name);
 			free(name);
 
@@ -1207,9 +1130,9 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			if (sb->buffer.len)
 			{
 				if (orig_size < sb->buffer.len)
-					dst_addr = call_module_realloc(dst_ctx, dst_addr, sb->buffer.len);
+					dst_addr = call_module_realloc(ctx, dst_addr, sb->buffer.len);
 
-				wahe_copy_between_memories(NULL, (size_t) sb->buffer.buf, sb->buffer.len, dst_ctx, dst_addr);
+				wahe_copy_between_memories(NULL, (size_t) sb->buffer.buf, sb->buffer.len, ctx, dst_addr);
 			}
 			rl_mutex_unlock(&sb->mutex);
 
@@ -1217,120 +1140,91 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			done = 1;
 		}
 
-		// Return the module ID by giving the name of a module instance used in the .wahe setup file
-		start = end = 0;
-		sscanf(line, "Get ID of module %n%*s%n", &start, &end);
-		if (end)
-		{
-			char *name = make_string_copy_len(&line[start], end-start);
-			for (i=0; i < group->module_count; i++)
-				if (strcmp(group->module[i].wahe_name, name)==0)
-					break;
-
-			if (i < group->module_count)
-				return_msg_addr = module_sprintf_alloc(ctx, "0x%" PRIx64 "->%d", group, group->module[i].module_id);
-
-			free(name);
-			done = 1;
-		}
-
 		// Host address of pointer to the memory of a WASM/transpiled module
-		dst_module_id[0] = '\0';
-		sscanf(line, "Get memory pointer address of module ID %60s", dst_module_id);
-		if (dst_module_id[0])
+		n = 0;
+		sscanf(line, "Get memory pointer address%n", &n);
+		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx)
-			{
-				size_t memory_ptr = 0;
-				if (dst_ctx->native_memory)
-					memory_ptr = (size_t) dst_ctx->native_memory;
-				else
-					memory_ptr = (size_t) &dst_ctx->memory_ptr;
+			size_t memory_ptr = 0;
+			if (ctx->native_memory)
+				memory_ptr = (size_t) ctx->native_memory;
+			else
+				memory_ptr = (size_t) &ctx->memory_ptr;
 
-				if (memory_ptr)
-					return_msg_addr = module_sprintf_alloc(ctx, "%#zx", memory_ptr);
-			}
+			if (memory_ptr)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", memory_ptr);
 			done = 1;
 		}
 
 		// Host address of the stack pointer of a transpiled module
-		dst_module_id[0] = '\0';
-		sscanf(line, "Get stack pointer address of module ID %60s", dst_module_id);
-		if (dst_module_id[0])
+		n = 0;
+		sscanf(line, "Get stack pointer address%n", &n);
+		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->stack_ptr_addr)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) dst_ctx->stack_ptr_addr);
+			if (ctx->stack_ptr_addr)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) ctx->stack_ptr_addr);
 			done = 1;
 		}
 
 		// Heap base address in a WASM/transpiled module
-		dst_module_id[0] = '\0';
-		sscanf(line, "Get heap base of module ID %60s", dst_module_id);
-		if (dst_module_id[0])
+		n = 0;
+		sscanf(line, "Get heap base%n", &n);
+		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->heap_base)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->heap_base);
+			if (ctx->heap_base)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->heap_base);
 			done = 1;
 		}
 
 		// Data end address in a WASM/transpiled module
-		dst_module_id[0] = '\0';
-		sscanf(line, "Get data end of module ID %60s", dst_module_id);
-		if (dst_module_id[0])
+		n = 0;
+		sscanf(line, "Get data end%n", &n);
+		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->data_end)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->data_end);
+			if (ctx->data_end)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->data_end);
 			done = 1;
 		}
 
 		// Stack base in a WASM/transpiled module
-		dst_module_id[0] = '\0';
-		sscanf(line, "Get stack base of module ID %60s", dst_module_id);
-		if (dst_module_id[0])
+		n = 0;
+		sscanf(line, "Get stack base%n", &n);
+		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->stack_base)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->stack_base);
+			if (ctx->stack_base)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->stack_base);
 			done = 1;
 		}
 
 		// Stack pointer of a WASM module
-		dst_module_id[0] = '\0';
-		sscanf(line, "Get stack pointer of module ID %60s", dst_module_id);
-		if (dst_module_id[0])
+		n = 0;
+		sscanf(line, "Get stack pointer%n", &n);
+		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->native == NULL)
+			if (ctx->native == NULL)
 			{
-				size_t ptr = wahe_get_module_symbol_address(dst_ctx, "__stack_pointer", 0);
+				size_t ptr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
 				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ptr);
 			}
 			done = 1;
 		}
 
 		// Memory size of a WASM/transpiled module
-		dst_module_id[0] = '\0';
-		sscanf(line, "Get memory size of module ID %60s", dst_module_id);
-		if (dst_module_id[0])
+		n = 0;
+		sscanf(line, "Get memory size%n", &n);
+		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", dst_ctx->memory_size);
+			return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->memory_size);
 			done = 1;
 		}
 
 		// Memory size address of a WASM/transpiled module
-		dst_module_id[0] = '\0';
-		sscanf(line, "Get memory size address of module ID %60s", dst_module_id);
-		if (dst_module_id[0])
+		n = 0;
+		sscanf(line, "Get memory size address%n", &n);
+		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			wahe_module_t *dst_ctx = wahe_get_module_by_id_string(dst_module_id);
-			if (dst_ctx && dst_ctx->memory_size_addr)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) dst_ctx->memory_size_addr);
+			if (ctx->memory_size_addr)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) ctx->memory_size_addr);
 			done = 1;
 		}
 
@@ -1350,14 +1244,17 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 
 		// Save raw file TODO: move to OS Basics module
 		start = end = 0;
-		src_module_id[0] = '\0';
 		size_t data_addr = 0, data_size = 0;
-		sscanf(line, "Save raw file to path %n%*[^\n]%n\nData location: %zi bytes at %zi (module %60[^)])", &start, &end, &data_size, &data_addr, src_module_id);
-		if (data_addr)
+		n = 0;
+		sscanf(line, "Save raw file to path %n%*[^\n]%n\nData location: %zi bytes at %zi%n", &start, &end, &data_size, &data_addr, &n);
+		if (data_addr && n && (line[n] == '\0' || line[n] == '\n'))
 		{
 			// TODO handle paths relative to the .wahe file better
 			char *path = make_string_copy_len(&line[start], end-start);
-			int ret = save_raw_file(path, "wb", wahe_get_pointer_to_addr_by_module_id(src_module_id, data_addr), data_size);
+
+			// Refresh the caller's memory before reading the data
+			wahe_get_module_memory(ctx);
+			int ret = save_raw_file(path, "wb", &ctx->memory_ptr[data_addr], data_size);
 			if (ret == 0)
 				return_msg_addr = module_sprintf_alloc(ctx, "Error: Couldn't write to file %s", path);
 			else
