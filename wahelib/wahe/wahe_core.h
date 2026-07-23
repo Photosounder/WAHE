@@ -75,10 +75,31 @@ typedef struct
 	int src_eo, dst_eo;
 } wahe_connection_t;
 
+enum wahe_cmd_target_type
+{
+	WAHE_CMD_TARGET_MODULE,
+	WAHE_CMD_TARGET_HOST
+};
+
+enum wahe_host_cmd_result
+{
+	WAHE_HOST_CMD_NOT_HANDLED,
+	WAHE_HOST_CMD_HANDLED,
+	WAHE_HOST_CMD_RETURN
+};
+
+typedef enum wahe_host_cmd_result (*wahe_host_cmd_func_t)(wahe_module_t *ctx, const char **line, size_t *return_msg_addr);
+
 typedef struct
 {
 	uint64_t hash;
-	int word_count, module_id;
+	int word_count;
+	enum wahe_cmd_target_type target_type;
+	union
+	{
+		int module_id;
+		wahe_host_cmd_func_t host_func;
+	};
 } wahe_cmd_reg_t;
 
 typedef struct
@@ -124,7 +145,7 @@ typedef struct
 
 	wahe_cmd_reg_t *cmd_reg;
 	size_t cmd_reg_count, cmd_reg_as;
-	int max_cmd_word_count;
+	int max_cmd_word_count, host_commands_registered;
 } wahe_group_t;
 
 extern _Thread_local wahe_chain_t *wahe_cur_chain;
@@ -150,6 +171,7 @@ extern int wahe_message_to_raster(wahe_module_t *ctx, size_t msg_addr, raster_t 
 extern size_t module_vsprintf_alloc(wahe_module_t *ctx, const char *format, va_list args);
 extern size_t module_sprintf_alloc(wahe_module_t *ctx, const char* format, ...);
 extern char *wahe_send_input(wahe_module_t *ctx, const char *format, ...);
+extern void wahe_register_host_commands(wahe_group_t *group);
 extern void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path);
 extern void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr);
 extern size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module);

@@ -55,6 +55,9 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 	wahe_chain_t *chain = NULL;
 	int init = 0;
 
+	// Register host commands before modules so module registrations keep precedence
+	wahe_register_host_commands(group);
+
 	// Re-add already loaded modules to the module symbol list
 	for (is=0; is < group->module_count; is++)
 		wahe_add_symbol_to_table(&symb_module, make_string_copy(group->module[is].module_name));

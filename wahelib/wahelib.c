@@ -12,6 +12,7 @@
 #endif
 
 #include "wahe/wahe_core.c"
+#include "wahe/wahe_host_commands.c"
 #include "wahe/wahe_execution.c"
 #include "wahe/wahe_parser.c"
 #include "wahe/wahe_virtual_memory.c"

@@ -543,6 +543,17 @@ int is_wasmtime_func_found(wasmtime_func_t func)
 }
 #endif // WAHE_WASMTIME
 
+static wahe_cmd_reg_t *wahe_add_command_registration(wahe_group_t *group, const char *command)
+{
+	// Allocate and initialise the common registration fields
+	alloc_enough(&group->cmd_reg, group->cmd_reg_count+=1, &group->cmd_reg_as, sizeof(wahe_cmd_reg_t), 1.2);
+	wahe_cmd_reg_t *reg = &group->cmd_reg[group->cmd_reg_count-1];
+	reg->hash = get_string_hash(command);
+	reg->word_count = string_count_fields(command, " ");
+	group->max_cmd_word_count = MAXN(group->max_cmd_word_count, reg->word_count);
+	return reg;
+}
+
 void wahe_register_commands(wahe_module_t *ctx, char *list)
 {
 	wahe_group_t *group = ctx->parent_group;
@@ -554,14 +565,9 @@ void wahe_register_commands(wahe_module_t *ctx, char *list)
 	for (il = 0; il < linecount; il++)
 	{
 		// Blindly add command to register, even if it's already been registered
-		alloc_enough(&group->cmd_reg, group->cmd_reg_count+=1, &group->cmd_reg_as, sizeof(wahe_cmd_reg_t), 1.2);
-
-		wahe_cmd_reg_t *reg = &group->cmd_reg[group->cmd_reg_count-1];
-		reg->hash = get_string_hash(array[il]);
-		reg->word_count = string_count_fields(array[il], " ");
+		wahe_cmd_reg_t *reg = wahe_add_command_registration(group, array[il]);
+		reg->target_type = WAHE_CMD_TARGET_MODULE;
 		reg->module_id = ctx->module_id;
-
-		group->max_cmd_word_count = MAXN(group->max_cmd_word_count, reg->word_count);
 	}
 
 	free_2d(array, 1);
@@ -899,7 +905,6 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 {
 	wahe_group_t *group = NULL;
 	size_t return_msg_addr = 0;
-	int n, start, end;
 
 	if (message == NULL)
 		return 0;
@@ -974,342 +979,34 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 
 		// Go through every registered command to find a match
 		for (int i = group->cmd_reg_count-1; i >= 0; i--)
-			if (group->cmd_reg[i].hash == msg_hash[ group->cmd_reg[i].word_count-1 ] && group->cmd_reg[i].module_id != ctx->module_id)
+			if (group->cmd_reg[i].hash == msg_hash[group->cmd_reg[i].word_count-1])
 			{
-				wahe_module_t *registered_module = &group->module[ group->cmd_reg[i].module_id ];
+				wahe_cmd_reg_t *reg = &group->cmd_reg[i];
 
-				// Send the command to the module that registered it
-				char *ret_msg = wahe_send_input(registered_module, "From memory %#zx\n%s", (size_t) ctx->memory_ptr, line);
-
-				// Copy the return message with its source memory address
-				if (ret_msg)
-					return_msg_addr = wahe_copy_message_between_modules(registered_module, ret_msg, ctx);
-				return return_msg_addr;
-		}
-		//**                         **
-
-		// Initialise fixed-address virtual memory for a wasm-to-native module
-		size_t initial_commit_size = 0, reserve_size = 0;
-		n = 0;
-		sscanf(line, "Init memory to %zu - %zu%n", &initial_commit_size, &reserve_size, &n);
-		if (n)
-		{
-			// Allocate the module's first and only memory reservation
-			uint8_t *memory = wahe_virtual_memory_alloc(initial_commit_size, reserve_size);
-
-			// Track the reservation for later commit and decommit commands
-			if (memory)
-			{
-				ctx->memory_ptr = memory;
-				ctx->memory_size = initial_commit_size;
-				ctx->memory_reserve_size = reserve_size;
-
-				// Return the address as a pointer
-				return (size_t) memory;
-			}
-			else
-				fprintf_rl(stderr, "Initialising virtual memory of module %s with %zu committed bytes and %zu reserved bytes failed\n", ctx->module_name, initial_commit_size, reserve_size);
-
-			done = 1;
-		}
-
-		// Enlarge the committed prefix without changing its base address
-		size_t enlarged_commit_size = 0;
-		n = 0;
-		sscanf(line, "Enlarge memory to %zu bytes%n", &enlarged_commit_size, &n);
-		if (n)
-		{
-			// Clamp oversized requests to the end of the reservation
-			if (ctx->memory_reserve_size && enlarged_commit_size > ctx->memory_reserve_size)
-			{
-				fprintf_rl(stderr, "Cannot enlarge virtual memory of module %s beyond its %zu-byte reservation\n", ctx->module_name, ctx->memory_reserve_size);
-				enlarged_commit_size = ctx->memory_reserve_size;
-			}
-
-			// Commit only valid growth within the existing reservation
-			if (ctx->memory_reserve_size == 0)
-				fprintf_rl(stderr, "Virtual memory of module %s has not been initialised\n", ctx->module_name);
-			else if (enlarged_commit_size < ctx->memory_size)
-				fprintf_rl(stderr, "Enlarging virtual memory of module %s to %zu bytes would shrink its committed area\n", ctx->module_name, enlarged_commit_size);
-			else if (wahe_virtual_memory_commit(ctx->memory_ptr, enlarged_commit_size))
-			{
-				ctx->memory_size = enlarged_commit_size;
-				if (ctx->memory_size_addr)
-					*ctx->memory_size_addr = enlarged_commit_size;
-			}
-			else
-				fprintf_rl(stderr, "Enlarging virtual memory of module %s to %zu bytes failed\n", ctx->module_name, enlarged_commit_size);
-
-			done = 1;
-		}
-
-		// Shrink the committed prefix without changing its base address
-		size_t shrink_size = 0;
-		n = 0;
-		sscanf(line, "Shrink memory to %zu bytes%n", &shrink_size, &n);
-		if (n)
-		{
-			// Decommit only valid shrinkage within an existing reservation
-			if (ctx->memory_reserve_size == 0)
-				fprintf_rl(stderr, "Virtual memory of module %s has not been initialised\n", ctx->module_name);
-			else if (shrink_size > ctx->memory_size)
-				fprintf_rl(stderr, "Shrinking virtual memory of module %s to %zu bytes would enlarge its committed area\n", ctx->module_name, shrink_size);
-			else if (wahe_virtual_memory_decommit(ctx->memory_ptr, shrink_size, ctx->memory_size))
-			{
-				ctx->memory_size = shrink_size;
-				if (ctx->memory_size_addr)
-					*ctx->memory_size_addr = shrink_size;
-			}
-			else
-				fprintf_rl(stderr, "Shrinking virtual memory of module %s to %zu bytes failed\n", ctx->module_name, shrink_size);
-
-			done = 1;
-		}
-
-		// Run chain
-		n = start = end = 0;
-		sscanf(line, "Run chain %n%*[^\n]%n\n%n", &start, &end, &n);
-		if (end)
-		{
-			wahe_chain_t *chain_to_run = NULL;
-			char *name = make_string_copy_len(&line[start], end-start);
-
-			for (int i=0; i < group->chain_count; i++)
-				if (group->chain[i].chain_name && strcmp(group->chain[i].chain_name, name) == 0)
-					chain_to_run = &group->chain[i];
-
-			if (chain_to_run)
-			{
-				// Point to the chain_input_msg
-				const char *input_msg = NULL;
-				char *prefixed_input_msg = NULL;
-				if (n)
+				// Forward dynamically registered commands to their owning module
+				if (reg->target_type == WAHE_CMD_TARGET_MODULE)
 				{
-					// Prefix the chain input with the calling module's memory address
-					prefixed_input_msg = sprintf_alloc("From memory %#zx\n%s", (size_t) ctx->memory_ptr, &line[n]);
-					input_msg = prefixed_input_msg;
+					if (reg->module_id == ctx->module_id)
+						continue;
+
+					wahe_module_t *registered_module = &group->module[reg->module_id];
+					char *ret_msg = wahe_send_input(registered_module, "From memory %#zx\n%s", (size_t) ctx->memory_ptr, line);
+					if (ret_msg)
+						return_msg_addr = wahe_copy_message_between_modules(registered_module, ret_msg, ctx);
+					return return_msg_addr;
 				}
 
-				// Execute chain and get the last message
-				char *end_msg = wahe_execute_chain(chain_to_run, input_msg);
-				free(prefixed_input_msg);
-
-				// Find the module whose memory contains the last message
-				wahe_module_t *end_module = NULL;
-				for (size_t i = chain_to_run->exec_order_count; i > 0; i--)
+				// Run host commands with the issuing module as their caller context
+				enum wahe_host_cmd_result result = reg->host_func(ctx, &line, &return_msg_addr);
+				if (result == WAHE_HOST_CMD_RETURN)
+					return return_msg_addr;
+				if (result == WAHE_HOST_CMD_HANDLED)
 				{
-					// Select the last module function in the chain
-					if (chain_to_run->exec_order[i-1].type == WAHE_EO_MODULE_FUNC)
-					{
-						end_module = &group->module[ chain_to_run->exec_order[i-1].module_id ];
-						break;
-					}
-				}
-
-				// Copy the last message with its source memory address
-				if (end_msg)
-					return_msg_addr = wahe_copy_message_between_modules(end_module, end_msg, ctx);
-			}
-			//else
-			//	fprintf(stderr, "The 'Run chain' command from %s:%s could not be executed because the chain named '%s' couldn't be found.\n", ctx->module_name, chain ? wahe_func_name[chain->current_func] : "(?)", name);
-			free(name);
-
-			return return_msg_addr;
-		}
-
-		// Copy buffer between memories
-		size_t src_addr, copy_size, dst_addr;
-		n = 0;
-		sscanf(line, "Copy %zi bytes at %zi to %zi%n", &copy_size, &src_addr, &dst_addr, &n);
-		if (n)
-		{
-			// Treat the unsuffixed addresses as direct host addresses
-			if (line[n] == '\0' || line[n] == '\n')
-			{
-				wahe_copy_between_memories(NULL, src_addr, copy_size, NULL, dst_addr);
-				done = 1;
-			}
-			else
-			{
-				// Recognise a module-relative destination address
-				int module_suffix_len = 0;
-				sscanf(&line[n], " in this module%n", &module_suffix_len);
-				if (module_suffix_len)
-				{
-					// Treat the source as a host address and the destination as a calling-module offset
-					wahe_copy_between_memories(NULL, src_addr, copy_size, ctx, dst_addr);
 					done = 1;
+					break;
 				}
 			}
-		}
-
-		// Host address of the module memory
-		n = 0;
-		sscanf(line, "Get memory address%n", &n);
-		if (n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			if (ctx->memory_ptr)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) ctx->memory_ptr);
-			done = 1;
-		}
-
-		// Host address of the stack pointer of a transpiled module
-		n = 0;
-		sscanf(line, "Get stack pointer address%n", &n);
-		if (n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			if (ctx->stack_ptr_addr)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) ctx->stack_ptr_addr);
-			done = 1;
-		}
-
-		// Heap base address in a WASM/transpiled module
-		n = 0;
-		sscanf(line, "Get heap base%n", &n);
-		if (n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			if (ctx->heap_base)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->heap_base);
-			done = 1;
-		}
-
-		// Data end address in a WASM/transpiled module
-		n = 0;
-		sscanf(line, "Get data end%n", &n);
-		if (n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			if (ctx->data_end)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->data_end);
-			done = 1;
-		}
-
-		// Stack base in a WASM/transpiled module
-		n = 0;
-		sscanf(line, "Get stack base%n", &n);
-		if (n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			if (ctx->stack_base)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->stack_base);
-			done = 1;
-		}
-
-		// Stack pointer of a WASM module
-		n = 0;
-		sscanf(line, "Get stack pointer%n", &n);
-		if (n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			if (ctx->native == NULL)
-			{
-				size_t ptr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ptr);
-			}
-			done = 1;
-		}
-
-		// Memory size of a WASM/transpiled module
-		n = 0;
-		sscanf(line, "Get memory size%n", &n);
-		if (n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->memory_size);
-			done = 1;
-		}
-
-		// Memory size address of a WASM/transpiled module
-		n = 0;
-		sscanf(line, "Get memory size address%n", &n);
-		if (n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			size_t *memory_size_addr = ctx->memory_size_addr ? ctx->memory_size_addr : &ctx->memory_size;
-			return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) memory_size_addr);
-			done = 1;
-		}
-
-		// Load raw file TODO: move to OS Basics module
-		start = end = 0;
-		sscanf(line, "Load raw file at path %n%*[^\n]%n", &start, &end);
-		if (end)
-		{
-			// TODO handle paths relative to the .wahe file better
-			size_t data_addr, data_size = 0;
-			char *path = make_string_copy_len(&line[start], end-start);
-			data_addr = wahe_load_raw_file(ctx, path, &data_size);
-			free(path);
-			return_msg_addr = module_sprintf_alloc(ctx, "Data location: %zu bytes at %#zx", data_size, (void *) data_addr);
-			done = 1;
-		}
-
-		// Save raw file TODO: move to OS Basics module
-		start = end = 0;
-		size_t data_addr = 0, data_size = 0;
-		n = 0;
-		sscanf(line, "Save raw file to path %n%*[^\n]%n\nData location: %zi bytes at %zi%n", &start, &end, &data_size, &data_addr, &n);
-		if (data_addr && n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			// TODO handle paths relative to the .wahe file better
-			char *path = make_string_copy_len(&line[start], end-start);
-			int ret = save_raw_file(path, "wb", &ctx->memory_ptr[data_addr], data_size);
-			if (ret == 0)
-				return_msg_addr = module_sprintf_alloc(ctx, "Error: Couldn't write to file %s", path);
-			else
-				return_msg_addr = module_sprintf_alloc(ctx, "Done.");
-			free(path);
-			done = 1;
-			line = strstr_after(line, "\n");
-		}
-
-		// Return raw time TODO: move to OS Basics module
-		n = 0;
-		sscanf(line, "Get raw time%n", &n);
-		if (n)
-		{
-			return_msg_addr = module_sprintf_alloc(ctx, "Raw time %.17g seconds", get_time_hr());
-			done = 1;
-		}
-
-		// Mouse warp
-		#ifdef H_ROUZICLIB
-		n = 0;
-		sscanf(line, "Mouse capture%n", &n);
-		if (n)
-		{
-			mouse.b.orig = zc.offset_u;
-			mouse.warp_if_move = 1;
-			done = 1;
-		}
-
-		n = 0;
-		sscanf(line, "Mouse release%n", &n);
-		if (n)
-		{
-			mouse.b.orig = zc.offset_u;
-			mouse.warp_if_move = 0;
-			done = 1;
-		}
-		#endif
-
-		// Benchmark return
-		n = 0;
-		sscanf(line, "Benchmark%n", &n);
-		if (n)
-		{
-			wahe_bench_point("-Benchmark command-", 0);
-			done = 1;
-		}
-
-		// Print to host
-		n = 0;
-		sscanf(line, "Print%n", &n);
-		if (n && (line[n] == ' ' || line[n] == '\n'))
-		{
-			if (get_string_linecount(&line[n+1], 0) > 1)
-				fprintf_rl(stdout, "\n=== from %s:%s ===\n%s\n    ===    ===    \n\n",
-						ctx->module_name, chain ? wahe_func_name[chain->current_func] : "(?)", &line[n+1]);
-			else
-				fprintf_rl(stdout, "(from %s:%s)   %s\n",
-						ctx->module_name, chain ? wahe_func_name[chain->current_func] : "(?)", &line[n+1]);
-			return 0;
-		}
+		//**                         **
 
 loop_end:
 		// Print line if it wasn't interpreted
