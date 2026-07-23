@@ -31,7 +31,6 @@ typedef struct
 	int valid;
 	char *module_name;
 	char *wahe_name;
-	char *sync_group_name;
 	int module_id;
 	rl_mutex_t mutex;
 	void *parent_group;	// wahe_group_t *
@@ -75,14 +74,6 @@ typedef struct
 {
 	int src_eo, dst_eo;
 } wahe_connection_t;
-
-typedef struct
-{
-	char *name;
-	uint64_t name_hash;
-	buffer_t buffer;
-	rl_mutex_t mutex;
-} wahe_shared_buffer_t;
 
 typedef struct
 {
@@ -134,10 +125,6 @@ typedef struct
 	wahe_cmd_reg_t *cmd_reg;
 	size_t cmd_reg_count, cmd_reg_as;
 	int max_cmd_word_count;
-
-	rl_mutex_t shared_buffer_mutex;
-	wahe_shared_buffer_t *shared_buffer;
-	size_t shared_buffer_count, shared_buffer_as;
 } wahe_group_t;
 
 extern _Thread_local wahe_chain_t *wahe_cur_chain;

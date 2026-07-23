@@ -73,10 +73,6 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 	chain->parent_group = group;
 	wahe_cur_chain = chain;
 
-	// Initialise the shared buffer mutex
-	if (init)
-		rl_mutex_init(&group->shared_buffer_mutex);
-
 	// Go through each line
 	for (il=0; il < linecount; il++)
 	{
@@ -110,37 +106,6 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 
 			// Store instance name
 			group->module[is].wahe_name = make_string_copy(module_name);
-		}
-
-		// Sync group
-		memset(n, 0, sizeof(n));
-		sscanf(line, "Sync group %n%*[^:]%n: %n%*s%n", &n[0], &n[1], &n[2], &n[3]);
-		if (n[3])
-		{
-			char *p = &line[n[2]];
-			while (p)
-			{
-				// Get module name
-				n[2] = n[3] = 0;
-				sscanf(p, " %n%*s%n", &n[2], &n[3]);
-				if (n[3] == 0)
-					break;
-
-				char *module_name = make_string_copy_len(&p[n[2]], n[3]-n[2]);
-				p = &p[n[3]];
-
-				// Find module
-				is = wahe_find_symbol_in_table(&symb_module, module_name);
-				if (is == -1)
-				{
-					bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Module symbol name \"%s\" not previously defined.\n", filepath, il, module_name);
-					free(module_name);
-					goto end;
-				}
-				else
-					group->module[is].sync_group_name = make_string_copy_len(&line[n[0]], n[1]-n[0]);
-				free(module_name);
-			}
 		}
 
 		// Set display

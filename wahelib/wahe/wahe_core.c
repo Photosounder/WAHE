@@ -888,42 +888,6 @@ void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int d
 }
 #endif
 
-wahe_shared_buffer_t *wahe_add_or_find_shared_buffer(wahe_group_t *group, const char *name)
-{
-	int i;
-	uint64_t name_hash = get_string_hash(name);
-
-	rl_mutex_lock(&group->shared_buffer_mutex);
-
-	// Look for an existing buffer
-	for (i=0; i < group->shared_buffer_count; i++)
-		if (group->shared_buffer[i].name_hash == name_hash)
-		{
-			rl_mutex_unlock(&group->shared_buffer_mutex);
-			return &group->shared_buffer[i];
-		}
-
-	// Add the buffer
-	alloc_enough(&group->shared_buffer, group->shared_buffer_count+=1, &group->shared_buffer_as, sizeof(wahe_shared_buffer_t), 1.5);
-	wahe_shared_buffer_t *sb = &group->shared_buffer[group->shared_buffer_count-1];
-	sb->name = make_string_copy(name);
-	sb->name_hash = name_hash;
-	rl_mutex_init(&sb->mutex);
-
-	rl_mutex_unlock(&group->shared_buffer_mutex);
-
-	return sb;
-}
-
-char *wahe_make_sync_buffer_name(wahe_module_t *ctx, const char *name, int name_len)
-{
-	// Make name, add context's sync group prefix if present
-	if (ctx->sync_group_name)
-		return sprintf_alloc("%s %.*s", ctx->sync_group_name, name_len, name);
-	else
-		return make_string_copy_len(name, name_len);
-}
-
 // Get called from the module
 size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 {
@@ -1154,49 +1118,6 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
 			wahe_copy_between_memories(ctx, src_addr, copy_size, ctx, dst_addr);
-			done = 1;
-		}
-
-		// Sync module buffer to shared buffer
-		start = end = 0;
-		size_t offset = 0;
-		sscanf(line, "Sync %zi bytes at %zi to shared buffer %n%*s%n (offset %zu)", &copy_size, &src_addr, &start, &end, &offset);
-		if (end)
-		{
-			char *name = wahe_make_sync_buffer_name(ctx, &line[start], end-start);
-			wahe_shared_buffer_t *sb = wahe_add_or_find_shared_buffer(group, name);
-			free(name);
-
-			rl_mutex_lock(&sb->mutex);
-			buf_alloc_enough(&sb->buffer, offset+copy_size);
-			sb->buffer.len = sb->buffer.as;
-			wahe_copy_between_memories(ctx, src_addr, copy_size, NULL, (size_t) &sb->buffer.buf[offset]);
-			rl_mutex_unlock(&sb->mutex);
-
-			done = 1;
-		}
-
-		// Sync shared buffer to module buffer
-		size_t orig_size;
-		n = start = end = 0;
-		sscanf(line, "Sync shared buffer %n%*s%n to %zi bytes at %zi%n", &start, &end, &orig_size, &dst_addr, &n);
-		if (end && n && (line[n] == '\0' || line[n] == '\n'))
-		{
-			char *name = wahe_make_sync_buffer_name(ctx, &line[start], end-start);
-			wahe_shared_buffer_t *sb = wahe_add_or_find_shared_buffer(group, name);
-			free(name);
-
-			rl_mutex_lock(&sb->mutex);
-			if (sb->buffer.len)
-			{
-				if (orig_size < sb->buffer.len)
-					dst_addr = call_module_realloc(ctx, dst_addr, sb->buffer.len);
-
-				wahe_copy_between_memories(NULL, (size_t) sb->buffer.buf, sb->buffer.len, ctx, dst_addr);
-			}
-			rl_mutex_unlock(&sb->mutex);
-
-			return_msg_addr = module_sprintf_alloc(ctx, "Buffer location: %zi bytes at %#zx", sb->buffer.len, (void *) dst_addr);
 			done = 1;
 		}
 
