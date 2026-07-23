@@ -729,10 +729,16 @@ void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size
 	if (dst_module && dst_module->valid == 0)
 		return;
 
-	// TODO Check boundaries
+	// Reject source ranges outside the module's active memory
+	if (src_module && (src_module->memory_ptr == NULL || src_addr > src_module->memory_size || copy_size > src_module->memory_size - src_addr))
+		return;
+
+	// Reject destination ranges outside the module's active memory
+	if (dst_module && (dst_module->memory_ptr == NULL || dst_addr > dst_module->memory_size || copy_size > dst_module->memory_size - dst_addr))
+		return;
 
 	// Copy
-	memmove(dst_module ? &dst_module->memory_ptr[dst_addr] : (void *) dst_addr, src_module ? &src_module->memory_ptr[src_addr] : (void *) src_addr, copy_size);
+	memcpy(dst_module ? &dst_module->memory_ptr[dst_addr] : (void *) dst_addr, src_module ? &src_module->memory_ptr[src_addr] : (void *) src_addr, copy_size);
 }
 
 size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module)
@@ -1115,10 +1121,26 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		size_t src_addr, copy_size, dst_addr;
 		n = 0;
 		sscanf(line, "Copy %zi bytes at %zi to %zi%n", &copy_size, &src_addr, &dst_addr, &n);
-		if (n && (line[n] == '\0' || line[n] == '\n'))
+		if (n)
 		{
-			wahe_copy_between_memories(ctx, src_addr, copy_size, ctx, dst_addr);
-			done = 1;
+			// Treat the unsuffixed addresses as direct host addresses
+			if (line[n] == '\0' || line[n] == '\n')
+			{
+				wahe_copy_between_memories(NULL, src_addr, copy_size, NULL, dst_addr);
+				done = 1;
+			}
+			else
+			{
+				// Recognise a module-relative destination address
+				int module_suffix_len = 0;
+				sscanf(&line[n], " in this module%n", &module_suffix_len);
+				if (module_suffix_len)
+				{
+					// Treat the source as a host address and the destination as a calling-module offset
+					wahe_copy_between_memories(NULL, src_addr, copy_size, ctx, dst_addr);
+					done = 1;
+				}
+			}
 		}
 
 		// Host address of the module memory
