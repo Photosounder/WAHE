@@ -48,9 +48,6 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 						src_module = &group->module[chain->exec_order[conn->src_eo].module_id];
 						dst_module = &group->module[chain->exec_order[conn->dst_eo].module_id];
 
-						call_module_free(dst_module, eo->dst_msg_addr);
-						eo->dst_msg_addr = 0;
-
 						size_t src_addr = chain->exec_order[conn->src_eo].ret_msg_addr;
 
 						// Copy the message with its source memory address
@@ -60,8 +57,6 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 
 					case WAHE_EO_CHAIN_INPUT_MSG:
 						dst_module = &group->module[chain->exec_order[conn->dst_eo].module_id];
-						call_module_free(dst_module, eo->dst_msg_addr);
-						eo->dst_msg_addr = 0;
 
 						if (input_msg)
 						{
@@ -81,6 +76,10 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 			chain->current_cmd_proc_id = 0;
 			last_msg = call_module_func(exec_module, eo->dst_msg_addr, eo->func_id, 1);
 			chain->current_eo = -1;
+
+			// Free the input message after the module function returns
+			call_module_free(exec_module, eo->dst_msg_addr);
+			eo->dst_msg_addr = 0;
 		}
 
 		// If the execution order is to put keyboard-mouse messages in a module's memory
