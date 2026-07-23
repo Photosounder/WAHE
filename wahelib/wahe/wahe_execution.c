@@ -53,13 +53,9 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 
 						size_t src_addr = chain->exec_order[conn->src_eo].ret_msg_addr;
 
+						// Copy the message with its source memory address
 						if (src_addr)
-						{
-							size_t copy_size = strlen(&src_module->memory_ptr[src_addr]) + 1;
-
-							eo->dst_msg_addr = call_module_malloc(dst_module, copy_size);
-							wahe_copy_between_memories(src_module, src_addr, copy_size, dst_module, eo->dst_msg_addr);
-						}
+							eo->dst_msg_addr = wahe_copy_message_between_modules(src_module, &src_module->memory_ptr[src_addr], dst_module);
 						break;
 
 					case WAHE_EO_CHAIN_INPUT_MSG:

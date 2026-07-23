@@ -735,6 +735,16 @@ void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size
 	memmove(dst_module ? &dst_module->memory_ptr[dst_addr] : (void *) dst_addr, src_module ? &src_module->memory_ptr[src_addr] : (void *) src_addr, copy_size);
 }
 
+size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module)
+{
+	// Reject invalid module-to-module message transfers
+	if (src_module == NULL || dst_module == NULL || src_message == NULL || src_module->valid == 0 || dst_module->valid == 0)
+		return 0;
+
+	// Prefix the message with the source module's actual host memory address
+	return module_sprintf_alloc(dst_module, "From memory %#zx\n%s", (size_t) src_module->memory_ptr, src_message);
+}
+
 size_t wahe_load_raw_file(wahe_module_t *ctx, const char *path, size_t *size)
 {
 	FILE *in_file;
@@ -938,9 +948,7 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			wahe_module_t *dst_module = &group->module[dst_module_index];
 
 			// Copy message to cmd processing module
-			size_t len = strlen(message) + 1;
-			size_t dst_addr = call_module_malloc(dst_module, len);
-			memcpy(&dst_module->memory_ptr[dst_addr], message, len);
+			size_t dst_addr = wahe_copy_message_between_modules(ctx, message, dst_module);
 
 			// Call cmd processing function
 			chain->current_cmd_proc_id++;
@@ -955,9 +963,8 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			// Copy and return the return message
 			if (return_msg_addr_dst)
 			{
-				size_t ret_len = strlen(&dst_module->memory_ptr[return_msg_addr_dst]) + 1;
-				return_msg_addr = call_module_malloc(ctx, ret_len);
-				wahe_copy_between_memories(dst_module, return_msg_addr_dst, ret_len, &group->module[eo->module_id], return_msg_addr);
+				// Copy the processed message with its source memory address
+				return_msg_addr = wahe_copy_message_between_modules(dst_module, &dst_module->memory_ptr[return_msg_addr_dst], ctx);
 				call_module_free(dst_module, return_msg_addr_dst);
 				return return_msg_addr;
 			}
@@ -999,12 +1006,14 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		for (int i = group->cmd_reg_count-1; i >= 0; i--)
 			if (group->cmd_reg[i].hash == msg_hash[ group->cmd_reg[i].word_count-1 ] && group->cmd_reg[i].module_id != ctx->module_id)
 			{
-				// Send the command to the module that registered it
-				char *ret_msg = wahe_send_input(&group->module[ group->cmd_reg[i].module_id ], "%s", line);
+				wahe_module_t *registered_module = &group->module[ group->cmd_reg[i].module_id ];
 
-				// Copy the return message to give it to the caller
+				// Send the command to the module that registered it
+				char *ret_msg = wahe_send_input(registered_module, "From memory %#zx\n%s", (size_t) ctx->memory_ptr, line);
+
+				// Copy the return message with its source memory address
 				if (ret_msg)
-					return_msg_addr = module_sprintf_alloc(ctx, "%s", ret_msg);
+					return_msg_addr = wahe_copy_message_between_modules(registered_module, ret_msg, ctx);
 				return return_msg_addr;
 		}
 		//**                         **
@@ -1103,15 +1112,33 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			{
 				// Point to the chain_input_msg
 				const char *input_msg = NULL;
+				char *prefixed_input_msg = NULL;
 				if (n)
-					input_msg = &line[n];
+				{
+					// Prefix the chain input with the calling module's memory address
+					prefixed_input_msg = sprintf_alloc("From memory %#zx\n%s", (size_t) ctx->memory_ptr, &line[n]);
+					input_msg = prefixed_input_msg;
+				}
 
 				// Execute chain and get the last message
 				char *end_msg = wahe_execute_chain(chain_to_run, input_msg);
+				free(prefixed_input_msg);
 
-				// Copy the last message from the chain to give it to the caller
+				// Find the module whose memory contains the last message
+				wahe_module_t *end_module = NULL;
+				for (size_t i = chain_to_run->exec_order_count; i > 0; i--)
+				{
+					// Select the last module function in the chain
+					if (chain_to_run->exec_order[i-1].type == WAHE_EO_MODULE_FUNC)
+					{
+						end_module = &group->module[ chain_to_run->exec_order[i-1].module_id ];
+						break;
+					}
+				}
+
+				// Copy the last message with its source memory address
 				if (end_msg)
-					return_msg_addr = module_sprintf_alloc(ctx, "%s", end_msg);
+					return_msg_addr = wahe_copy_message_between_modules(end_module, end_msg, ctx);
 			}
 			//else
 			//	fprintf(stderr, "The 'Run chain' command from %s:%s could not be executed because the chain named '%s' couldn't be found.\n", ctx->module_name, chain ? wahe_func_name[chain->current_func] : "(?)", name);

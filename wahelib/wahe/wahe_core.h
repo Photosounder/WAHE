@@ -165,6 +165,7 @@ extern size_t module_sprintf_alloc(wahe_module_t *ctx, const char* format, ...);
 extern char *wahe_send_input(wahe_module_t *ctx, const char *format, ...);
 extern void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path);
 extern void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr);
+extern size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module);
 #ifdef H_ROUZICLIB
 extern void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int display_id, int conn_id);
 #endif
