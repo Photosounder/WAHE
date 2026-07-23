@@ -96,22 +96,7 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 
 			is = wahe_add_symbol_to_table(&symb_module, module_name);
 
-			size_t prev_module_as = group->module_as;
 			alloc_enough(&group->module, group->module_count = is+1, &group->module_as, sizeof(wahe_module_t), 1.5);
-			if (prev_module_as != group->module_as)		// update certain things in case of realloc
-			{
-				// Update stored addresses for previously loaded modules
-				for (i=0; i < is; i++)
-				{
-					wahe_module_t *ctx = &group->module[i];
-
-					if (ctx->native == NULL)
-					{
-						ctx->memory_size_addr = &ctx->memory_size;
-						ctx->memory_ptr = wasmtime_memory_data(ctx->context, &ctx->memory);
-					}
-				}
-			}
 
 			// Load module
 			if (check_file_is_readable(module_path))

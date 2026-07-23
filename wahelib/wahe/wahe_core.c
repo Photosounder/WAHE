@@ -1,3 +1,14 @@
+#ifdef _WIN32
+	#include <memoryapi.h>
+	#include <sysinfoapi.h>
+#else
+	#include <sys/mman.h>
+	#include <unistd.h>
+	#ifndef MAP_ANONYMOUS
+		#define MAP_ANONYMOUS MAP_ANON
+	#endif
+#endif
+
 const char *wahe_eo_name[] =
 {
 	"module_func",
@@ -20,7 +31,6 @@ const char *wahe_func_name[] =
 	"proc_sound"
 };
 
-_Thread_local wahe_module_t *wahe_cur_ctx = NULL;
 _Thread_local wahe_chain_t *wahe_cur_chain = NULL;
 
 void wahe_bench_point(const char *label, int depth)
@@ -102,13 +112,13 @@ size_t wasmtime_val_get_address(wasmtime_val_t val)
 }
 #endif // WAHE_WASMTIME
 
-int wahe_get_module_memory(wahe_module_t *ctx)
+static int wahe_init_module_memory(wahe_module_t *ctx)
 {
-	// Nothing to do if the module is NULL (this means host memory is being used)
+	// Accept host memory as already initialized
 	if (ctx == NULL)
 		return 1;
 
-	// Nothing to do if the module is native unless it's wasm-to-native
+	// Read the fixed memory address exported by a wasm-to-native module
 	if (ctx->native)
 	{
 		if (ctx->native_memory)
@@ -136,12 +146,9 @@ int wahe_get_module_memory(wahe_module_t *ctx)
 
 	ctx->memory = item.of.memory;
 
-	// Get pointer to start of module's linear memory and its size
+	// Store the fixed memory address and initial size
 	ctx->memory_ptr = wasmtime_memory_data(ctx->context, &ctx->memory);
-	size_t current_size = wasmtime_memory_data_size(ctx->context, &ctx->memory);
-	if (ctx->memory_size != current_size)
-		fprintf_rl(stdout, "Memory of module #%d %s grew from %zd kB to %zd kB\n", ctx->module_id, ctx->module_name, ctx->memory_size >> 10, current_size >> 10);
-	ctx->memory_size = current_size;
+	ctx->memory_size = wasmtime_memory_data_size(ctx->context, &ctx->memory);
 
 	return 1;
 
@@ -244,9 +251,9 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	if (ctx->native)
 	{
 		// Send pointers to the host's allocator if it can take them to manage its memory buffer
-		void (*receive_host_allocator)(void *, void *, void *, void *) = dynlib_find_symbol(ctx->native, "receive_host_allocator");
-		if (receive_host_allocator)
-			receive_host_allocator(malloc, calloc, free, realloc);
+		void (*wasm_decomp_init)(int32_t, void *) = dynlib_find_symbol(ctx->native, "wasm_decomp_init");
+		if (wasm_decomp_init)
+			wasm_decomp_init(ctx->module_id, wahe_run_command_with_id_native);
 
 		// Initialise the memory buffer of a wasm-to-native module
 		ctx->native_memory = (uint8_t **) wahe_get_module_symbol_address(ctx, "mem0", 0);
@@ -279,49 +286,38 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	{
 		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
 		ctx->data_end = wahe_get_module_symbol_address(ctx, "__data_end", 0);
-		ctx->memory_size_addr = &ctx->memory_size;
 	}
 }
 
 size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enum wahe_func_id func_id)
 {
-	int current_module;
 	size_t ret_val;
 
 	if (!ctx->valid)
 		return 0;
 
-	wahe_chain_t *chain = wahe_cur_chain;
-	if (chain)
-	{
-		current_module = chain->current_module;
-		chain->current_module = ctx->module_id;
-	}
-
 	// Native call
 	if (ctx->native)
 	{
-		swap_ptr(&wahe_cur_ctx, &ctx);
-
 		switch (func_id)
 		{
 			case WAHE_FUNC_MALLOC:
 			{
-				void *(*func)(size_t) = wahe_cur_ctx->dl_func[WAHE_FUNC_MALLOC];
+				void *(*func)(size_t) = ctx->dl_func[WAHE_FUNC_MALLOC];
 				ret_val = (size_t) func(arg[0]);
 				break;
 			}
 
 			case WAHE_FUNC_REALLOC:
 			{
-				void *(*func)(size_t,size_t) = wahe_cur_ctx->dl_func[WAHE_FUNC_REALLOC];
+				void *(*func)(size_t,size_t) = ctx->dl_func[WAHE_FUNC_REALLOC];
 				ret_val = (size_t) func(arg[0], arg[1]);
 				break;
 			}
 
 			case WAHE_FUNC_FREE:
 			{
-				void (*func)(void *) = wahe_cur_ctx->dl_func[WAHE_FUNC_FREE];
+				void (*func)(void *) = ctx->dl_func[WAHE_FUNC_FREE];
 				func((void *) arg[0]);
 				ret_val = 0;
 				break;
@@ -329,19 +325,11 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 
 			default:
 			{
-				char *(*func)(char *) = wahe_cur_ctx->dl_func[func_id];
+				char *(*func)(char *) = ctx->dl_func[func_id];
 				ret_val = (size_t) func((char *) arg[0]);
 			}
 		}
 
-		swap_ptr(&wahe_cur_ctx, &ctx);
-
-		// Update memory pointer for wasm-to-native
-		wahe_get_module_memory(ctx);
-
-		// Restore current_module
-		if (chain)
-			chain->current_module = current_module;
 		return ret_val;
 	}
 
@@ -350,6 +338,7 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 		*(int32_t*) &ctx->memory_ptr[ctx->cita_time_addr] = get_time_hr() * 100.;
 
 	#ifdef WAHE_WASMTIME
+	wahe_chain_t *chain = wahe_cur_chain;
 	wasmtime_error_t *error;
 	wasm_trap_t *trap = NULL;
 	wasmtime_val_t ret[1], param[2];
@@ -363,12 +352,17 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 
 	// Call the function
 	wahe_bench_point("calling function", 1);
-	int prev_func = chain->current_func;
-	chain->current_func = func_id;
+	int prev_func = WAHE_FUNC_NONE;
+	if (chain)
+	{
+		prev_func = chain->current_func;
+		chain->current_func = func_id;
+	}
 	rl_mutex_lock(&ctx->mutex);
 	error = wasmtime_func_call(ctx->context, &ctx->func[func_id], param, arg_count, ret, func_id != WAHE_FUNC_FREE, &trap);
 	rl_mutex_unlock(&ctx->mutex);
-	chain->current_func = prev_func;
+	if (chain)
+		chain->current_func = prev_func;
 	wahe_bench_point("function returned", -1);
 	if (error || trap)
 	{
@@ -385,12 +379,6 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 			fprintf_rl(stderr, "call_module_func_core() expected a type %s result from %s:%s()\n", ctx->address_type==WASMTIME_I32 ? "int32_t" : "int64_t", ctx->module_name, wahe_func_name[func_id]);
 			return 0;
 		}
-
-	// Restore current_module
-	chain->current_module = current_module;
-
-	// Update memory pointer
-	wahe_get_module_memory(ctx);
 
 	// Return the raw return value
 	return wasmtime_val_get_address(ret[0]);
@@ -654,10 +642,13 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 
 		// Initialise callbacks (host functions called from WASM module)
 		func_type = wasm_functype_new_1_1(wasm_valtype_new_i32(), wasm_valtype_new_i32());
-		error = wasmtime_linker_define_func(ctx->linker, "env", strlen("env"), "wahe_run_command", strlen("wahe_run_command"), func_type, wahe_run_command, parent_group, NULL);
+
+		// Pass the calling module context directly to the host callback
+		error = wasmtime_linker_define_func(ctx->linker, "env", strlen("env"), "wahe_run_command", strlen("wahe_run_command"), func_type, wahe_run_command, ctx, NULL);
 		if (error)
 		{
 			fprintf_rl(stderr, "Error defining callback in wasmtime_linker_define_func()\n");
+			wasm_functype_delete(func_type);
 			fprint_wasmtime_error(ctx, error, NULL);
 			return;
 		}
@@ -676,8 +667,8 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		wahe_init_all_module_symbols(ctx);
 		ctx->valid = 1;
 
-		// Get pointer to linear memory
-		wahe_get_module_memory(ctx);
+		// Store the module's fixed memory address
+		wahe_init_module_memory(ctx);
 
 		// Set the type of module addresses (currently always 32-bit)
 		ctx->address_type = WASMTIME_I32;
@@ -698,11 +689,14 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		// Find functions from the native module
 		wahe_init_all_module_symbols(ctx);
 		ctx->valid = 1;
+
+		// Store the module's fixed memory address
+		wahe_init_module_memory(ctx);
 	}
 
 	// Send pointer to wahe_run_command() if the module is not WASM
 	if (ctx->native)
-		wahe_send_input(ctx, "wahe_run_command() = %#zx", wahe_run_command_native);
+		wahe_send_input(ctx, "wahe_run_command_with_id() = %#zx", wahe_run_command_with_id_native);
 
 	// Register commands
 	char *cmd_reg_msg = wahe_send_input(ctx, "Command registration");
@@ -734,10 +728,6 @@ void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size
 
 	if (dst_module && dst_module->valid == 0)
 		return;
-
-	// Update memory pointers
-	wahe_get_module_memory(src_module);
-	wahe_get_module_memory(dst_module);
 
 	// TODO Check boundaries
 
@@ -955,7 +945,6 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			// Call cmd processing function
 			chain->current_cmd_proc_id++;
 			size_t return_msg_addr_dst = (size_t) call_module_func(dst_module, dst_addr, WAHE_FUNC_PROC_CMD, 0);
-			chain->current_module = ctx->module_id;
 			if (return_msg_addr_dst)
 				return_msg_addr_dst -= (size_t) dst_module->memory_ptr;
 			call_module_free(dst_module, dst_addr);
@@ -1017,39 +1006,83 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 				if (ret_msg)
 					return_msg_addr = module_sprintf_alloc(ctx, "%s", ret_msg);
 				return return_msg_addr;
-			}
+		}
 		//**                         **
 
-		// Shrink native module memory
+		// Initialise fixed-address virtual memory for a wasm-to-native module
+		size_t initial_commit_size = 0, reserve_size = 0;
+		n = 0;
+		sscanf(line, "Init memory to %zu - %zu%n", &initial_commit_size, &reserve_size, &n);
+		if (n)
+		{
+			// Allocate the module's first and only memory reservation
+			uint8_t *memory = wahe_virtual_memory_alloc(initial_commit_size, reserve_size);
+
+			// Track the reservation for later commit and decommit commands
+			if (memory)
+			{
+				ctx->memory_ptr = memory;
+				ctx->memory_size = initial_commit_size;
+				ctx->memory_reserve_size = reserve_size;
+
+				// Return the address as a pointer
+				return (size_t) memory;
+			}
+			else
+				fprintf_rl(stderr, "Initialising virtual memory of module %s with %zu committed bytes and %zu reserved bytes failed\n", ctx->module_name, initial_commit_size, reserve_size);
+
+			done = 1;
+		}
+
+		// Enlarge the committed prefix without changing its base address
+		size_t enlarged_commit_size = 0;
+		n = 0;
+		sscanf(line, "Enlarge memory to %zu bytes%n", &enlarged_commit_size, &n);
+		if (n)
+		{
+			// Clamp oversized requests to the end of the reservation
+			if (ctx->memory_reserve_size && enlarged_commit_size > ctx->memory_reserve_size)
+			{
+				fprintf_rl(stderr, "Cannot enlarge virtual memory of module %s beyond its %zu-byte reservation\n", ctx->module_name, ctx->memory_reserve_size);
+				enlarged_commit_size = ctx->memory_reserve_size;
+			}
+
+			// Commit only valid growth within the existing reservation
+			if (ctx->memory_reserve_size == 0)
+				fprintf_rl(stderr, "Virtual memory of module %s has not been initialised\n", ctx->module_name);
+			else if (enlarged_commit_size < ctx->memory_size)
+				fprintf_rl(stderr, "Enlarging virtual memory of module %s to %zu bytes would shrink its committed area\n", ctx->module_name, enlarged_commit_size);
+			else if (wahe_virtual_memory_commit(ctx->memory_ptr, enlarged_commit_size))
+			{
+				ctx->memory_size = enlarged_commit_size;
+				if (ctx->memory_size_addr)
+					*ctx->memory_size_addr = enlarged_commit_size;
+			}
+			else
+				fprintf_rl(stderr, "Enlarging virtual memory of module %s to %zu bytes failed\n", ctx->module_name, enlarged_commit_size);
+
+			done = 1;
+		}
+
+		// Shrink the committed prefix without changing its base address
 		size_t shrink_size = 0;
 		n = 0;
 		sscanf(line, "Shrink memory to %zu bytes%n", &shrink_size, &n);
 		if (n)
 		{
-			// Reallocate memory only for native modules that expose host-managed memory
-			if (ctx->native && ctx->native_memory)
+			// Decommit only valid shrinkage within an existing reservation
+			if (ctx->memory_reserve_size == 0)
+				fprintf_rl(stderr, "Virtual memory of module %s has not been initialised\n", ctx->module_name);
+			else if (shrink_size > ctx->memory_size)
+				fprintf_rl(stderr, "Shrinking virtual memory of module %s to %zu bytes would enlarge its committed area\n", ctx->module_name, shrink_size);
+			else if (wahe_virtual_memory_decommit(ctx->memory_ptr, shrink_size, ctx->memory_size))
 			{
-				wahe_get_module_memory(ctx);
-
-				// Keep the operation shrink-only
-				if (ctx->memory_ptr && shrink_size <= ctx->memory_size)
-				{
-					uint8_t *memory = realloc(ctx->memory_ptr, shrink_size);
-
-					// Publish the resized memory pointer and size
-					if (memory || shrink_size == 0)
-					{
-						ctx->memory_ptr = memory;
-						ctx->memory_size = shrink_size;
-
-						*ctx->native_memory = memory;
-						if (ctx->memory_size_addr)
-							*ctx->memory_size_addr = shrink_size;
-					}
-					else
-						fprintf_rl(stderr, "Shrinking memory of module %s to %zu bytes failed in realloc()\n", ctx->module_name, shrink_size);
-				}
+				ctx->memory_size = shrink_size;
+				if (ctx->memory_size_addr)
+					*ctx->memory_size_addr = shrink_size;
 			}
+			else
+				fprintf_rl(stderr, "Shrinking virtual memory of module %s to %zu bytes failed\n", ctx->module_name, shrink_size);
 
 			done = 1;
 		}
@@ -1140,19 +1173,13 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			done = 1;
 		}
 
-		// Host address of pointer to the memory of a WASM/transpiled module
+		// Host address of the module memory
 		n = 0;
-		sscanf(line, "Get memory pointer address%n", &n);
+		sscanf(line, "Get memory address%n", &n);
 		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			size_t memory_ptr = 0;
-			if (ctx->native_memory)
-				memory_ptr = (size_t) ctx->native_memory;
-			else
-				memory_ptr = (size_t) &ctx->memory_ptr;
-
-			if (memory_ptr)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", memory_ptr);
+			if (ctx->memory_ptr)
+				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) ctx->memory_ptr);
 			done = 1;
 		}
 
@@ -1223,8 +1250,8 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		sscanf(line, "Get memory size address%n", &n);
 		if (n && (line[n] == '\0' || line[n] == '\n'))
 		{
-			if (ctx->memory_size_addr)
-				return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) ctx->memory_size_addr);
+			size_t *memory_size_addr = ctx->memory_size_addr ? ctx->memory_size_addr : &ctx->memory_size;
+			return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) memory_size_addr);
 			done = 1;
 		}
 
@@ -1251,9 +1278,6 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		{
 			// TODO handle paths relative to the .wahe file better
 			char *path = make_string_copy_len(&line[start], end-start);
-
-			// Refresh the caller's memory before reading the data
-			wahe_get_module_memory(ctx);
 			int ret = save_raw_file(path, "wb", &ctx->memory_ptr[data_addr], data_size);
 			if (ret == 0)
 				return_msg_addr = module_sprintf_alloc(ctx, "Error: Couldn't write to file %s", path);
@@ -1334,21 +1358,16 @@ loop_end:
 	return return_msg_addr;
 }
 
-char *wahe_run_command_native(char *message)
+char *wahe_run_command_with_id_native(wahe_module_t *ctx, char *message)
 {
-	return (char *) wahe_run_command_core(wahe_cur_ctx, message);
+	return (char *) wahe_run_command_core(ctx, message);
 }
 
 #ifdef WAHE_WASMTIME
 wasm_trap_t *wahe_run_command(void *env, wasmtime_caller_t *caller, const wasmtime_val_t *arg, size_t arg_count, wasmtime_val_t *result, size_t result_count)
 {
-	wahe_group_t *group = env;
-	wahe_module_t *ctx = &group->module[wahe_cur_chain->current_module];
+	wahe_module_t *ctx = env;
 	size_t return_msg_addr = 0;
-	int n;
-
-	// Update memory pointer
-	wahe_get_module_memory(ctx);
 
 	// Parse message
 	if (wasmtime_val_get_address(arg[0]))

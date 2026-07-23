@@ -54,6 +54,7 @@ extern "C" {
   #include "wahe/wahe_core.h"
   #include "wahe/wahe_execution.h"
   #include "wahe/wahe_parser.h"
+  #include "wahe/wahe_virtual_memory.h"
   #include "wasm/wasm_binary_parser.h"
 
 #ifdef __cplusplus

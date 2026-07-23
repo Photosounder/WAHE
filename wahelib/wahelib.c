@@ -14,4 +14,5 @@
 #include "wahe/wahe_core.c"
 #include "wahe/wahe_execution.c"
 #include "wahe/wahe_parser.c"
+#include "wahe/wahe_virtual_memory.c"
 #include "wasm/wasm_binary_parser.c"

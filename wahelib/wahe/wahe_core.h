@@ -40,7 +40,7 @@ typedef struct
 	#endif
 
 	uint8_t *memory_ptr;
-	size_t stack_base, data_end, heap_base, memory_size, *memory_size_addr, *stack_ptr_addr, cita_time_addr;
+	size_t stack_base, data_end, heap_base, memory_size, memory_reserve_size, *memory_size_addr, *stack_ptr_addr, cita_time_addr;
 	int8_t memory_bits;
 	uint32_t page_count_initial, page_count_max;
 
@@ -115,7 +115,7 @@ typedef struct
 	wahe_exec_order_t *exec_order;
 	size_t exec_order_count, exec_order_as;
 	
-	int current_eo, current_cmd_proc_id, current_module, current_func;
+	int current_eo, current_cmd_proc_id, current_func;
 } wahe_chain_t;
 
 typedef struct
@@ -142,7 +142,11 @@ typedef struct
 
 extern _Thread_local wahe_chain_t *wahe_cur_chain;
 
-extern int wahe_get_module_memory(wahe_module_t *ctx);
+extern void *wahe_virtual_memory_alloc(size_t commit_size, size_t reserve_size);
+extern int wahe_virtual_memory_commit(void *memory, size_t commit_size);
+extern int wahe_virtual_memory_decommit(void *memory, size_t commit_size, size_t previous_commit_size);
+extern int wahe_virtual_memory_free(void *memory, size_t reserve_size);
+
 extern size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_name, int verbosity);
 extern void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_func_id func_id, int verbosity);
 extern void wahe_init_all_module_symbols(wahe_module_t *ctx);
@@ -165,7 +169,7 @@ extern void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_add
 extern void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int display_id, int conn_id);
 #endif
 
-extern char *wahe_run_command_native(char *message);
+extern char *wahe_run_command_with_id_native(wahe_module_t *ctx, char *message);
 #ifdef WAHE_WASMTIME
 extern wasm_trap_t *wahe_run_command(void *env, wasmtime_caller_t *caller, const wasmtime_val_t *arg, size_t arg_count, wasmtime_val_t *result, size_t result_count);
 #endif // WAHE_WASMTIME
