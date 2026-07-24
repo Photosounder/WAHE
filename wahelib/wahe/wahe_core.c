@@ -119,14 +119,21 @@ static int wahe_init_module_memory(wahe_module_t *ctx)
 		return 1;
 
 	// Read the fixed memory address exported by a wasm-to-native module
-	if (ctx->native)
+	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
 	{
-		if (ctx->native_memory)
-			ctx->memory_ptr = *ctx->native_memory;
+		ctx->memory_ptr = *ctx->native_memory;
 		if (ctx->memory_size_addr)
 			ctx->memory_size = *ctx->memory_size_addr;
 		return 1;
 	}
+
+	// Leave directly compiled native memory for the module to initialize
+	if (ctx->type == WAHE_MODULE_NATIVE)
+		return 1;
+
+	// Reject module types without Wasmtime memory
+	if (ctx->type != WAHE_MODULE_WASMTIME)
+		return 0;
 
 	#ifdef WAHE_WASMTIME
 	wasmtime_extern_t item;
@@ -162,7 +169,7 @@ size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_nam
 {
 	size_t addr = 0;
 
-	if (ctx->native)
+	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 	{
 		addr = (size_t) dynlib_find_symbol(ctx->native, symbol_name);
 
@@ -172,7 +179,7 @@ size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_nam
 		if (addr && verbosity == 1)
 			fprintf_rl(stdout, "Module #%d %s: symbol %s found\n", ctx->module_id, ctx->module_name, symbol_name);
 	}
-	else
+	else if (ctx->type == WAHE_MODULE_WASMTIME)
 	{
 		#ifdef WAHE_WASMTIME
 		wasmtime_extern_t symb_ext;
@@ -197,7 +204,7 @@ size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_nam
 
 void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_func_id func_id, int verbosity)
 {
-	if (ctx->native)
+	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 	{
 		ctx->dl_func[func_id] = dynlib_find_symbol(ctx->native, func_name);
 
@@ -207,7 +214,7 @@ void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_f
 		if (ctx->dl_func[func_id] && verbosity == 1)
 			fprintf_rl(stdout, "Module #%d %s: %s() found\n", ctx->module_id, ctx->module_name, func_name);
 	}
-	else
+	else if (ctx->type == WAHE_MODULE_WASMTIME)
 	{
 		#ifdef WAHE_WASMTIME
 		wasmtime_extern_t func_ext;
@@ -248,41 +255,46 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	wahe_get_module_func(ctx, "module_proc_image",    WAHE_FUNC_PROC_IMAGE, 1);
 	wahe_get_module_func(ctx, "module_proc_sound",    WAHE_FUNC_PROC_SOUND, 1);
 
-	if (ctx->native)
+	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 	{
-		// Send pointers to the host's allocator if it can take them to manage its memory buffer
-		void (*wasm_decomp_init)(int32_t, void *) = dynlib_find_symbol(ctx->native, "wasm_decomp_init");
-		if (wasm_decomp_init)
-			wasm_decomp_init(ctx->module_id, wahe_run_command_with_id_native);
-
-		// Initialise the memory buffer of a wasm-to-native module
+		// Identify a wasm-to-native module by its exported memory pointer
 		ctx->native_memory = (uint8_t **) wahe_get_module_symbol_address(ctx, "mem0", 0);
-		if (ctx->native_memory)
-			call_module_free(ctx, 0);	// Initialises the memory buffer
+		ctx->type = ctx->native_memory ? WAHE_MODULE_WASM_TO_NATIVE : WAHE_MODULE_NATIVE;
 
-		// Find the globals
-		size_t addr = wahe_get_module_symbol_address(ctx, "memory_bits", 0);
-		if (addr)
+		if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
 		{
-			ctx->memory_bits = *(int8_t *) addr;
+			// Send the host callback to the translated Wasm runtime
+			void (*wasm_decomp_init)(int32_t, void *) = dynlib_find_symbol(ctx->native, "wasm_decomp_init");
+			if (wasm_decomp_init)
+				wasm_decomp_init(ctx->module_id, wahe_run_command_with_id_native);
 
-			addr = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
+			// Initialise the translated module's memory buffer
+			call_module_free(ctx, 0);
+
+			// Find the translated Wasm globals
+			size_t addr = wahe_get_module_symbol_address(ctx, "memory_bits", 0);
 			if (addr)
-				ctx->heap_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
+			{
+				ctx->memory_bits = *(int8_t *) addr;
 
-			addr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
-			ctx->stack_ptr_addr = (size_t *) addr;
-			if (addr)
-				ctx->stack_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
+				addr = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
+				if (addr)
+					ctx->heap_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
 
-			addr = wahe_get_module_symbol_address(ctx, "__data_end", 0);
-			if (addr)
-				ctx->data_end = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
+				addr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
+				ctx->stack_ptr_addr = (size_t *) addr;
+				if (addr)
+					ctx->stack_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
 
-			ctx->memory_size_addr = (size_t *) wahe_get_module_symbol_address(ctx, "mem0_size", 0);
+				addr = wahe_get_module_symbol_address(ctx, "__data_end", 0);
+				if (addr)
+					ctx->data_end = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
+
+				ctx->memory_size_addr = (size_t *) wahe_get_module_symbol_address(ctx, "mem0_size", 0);
+			}
 		}
 	}
-	else
+	else if (ctx->type == WAHE_MODULE_WASMTIME)
 	{
 		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
 		ctx->data_end = wahe_get_module_symbol_address(ctx, "__data_end", 0);
@@ -297,7 +309,7 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 		return 0;
 
 	// Native call
-	if (ctx->native)
+	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 	{
 		switch (func_id)
 		{
@@ -429,7 +441,7 @@ char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_i
 	*ret_msg_addr = (size_t) call_module_func_core(ctx, &message_addr, 1, func_id);
 
 	// Return pointer to return message
-	if (ctx->native)
+	if (ctx->type == WAHE_MODULE_NATIVE)
 		return (char *) *ret_msg_addr;
 	if (*ret_msg_addr)
 		return (char *) &ctx->memory_ptr[*ret_msg_addr];
@@ -588,6 +600,9 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	// WASM module
 	if (check_if_file_is_wasm(path))
 	{
+		// Record the Wasmtime module type
+		ctx->type = WAHE_MODULE_WASMTIME;
+
 		#ifdef WAHE_WASMTIME
 		// Load WASM file
 		buffer_t wasm_buf = buf_load_raw_file(path);
@@ -692,8 +707,12 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	// Native module
 	else if ((ctx->native = dynlib_open(path)))
 	{
+		// Use the native ABI while discovering the dynamic library type
+		ctx->type = WAHE_MODULE_NATIVE;
+
 		// Find functions from the native module
 		wahe_init_all_module_symbols(ctx);
+
 		ctx->valid = 1;
 
 		// Store the module's fixed memory address
@@ -701,7 +720,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	}
 
 	// Send pointer to wahe_run_command() if the module is not WASM
-	if (ctx->native)
+	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 		wahe_send_input(ctx, "wahe_run_command_with_id() = %#zx", wahe_run_command_with_id_native);
 
 	// Register commands

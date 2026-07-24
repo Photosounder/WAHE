@@ -50,9 +50,12 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 
 						size_t src_addr = chain->exec_order[conn->src_eo].ret_msg_addr;
 
-						// Copy the message with its source memory address
+						// Convert the module return address to a host pointer and copy the message
 						if (src_addr)
-							eo->dst_msg_addr = wahe_copy_message_between_modules(src_module, &src_module->memory_ptr[src_addr], dst_module);
+						{
+							const char *src_message = src_module->type == WAHE_MODULE_NATIVE ? (const char *) src_addr : (const char *) &src_module->memory_ptr[src_addr];
+							eo->dst_msg_addr = wahe_copy_message_between_modules(src_module, src_message, dst_module);
+						}
 						break;
 
 					case WAHE_EO_CHAIN_INPUT_MSG:

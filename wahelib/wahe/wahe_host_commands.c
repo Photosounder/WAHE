@@ -244,7 +244,7 @@ static enum wahe_host_cmd_result wahe_hcmd_get_stack_pointer(wahe_module_t *ctx,
 		return WAHE_HOST_CMD_NOT_HANDLED;
 
 	// Read the stack pointer exported by a WASM module
-	if (ctx->native == NULL)
+	if (ctx->type == WAHE_MODULE_WASMTIME)
 	{
 		size_t ptr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
 		*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ptr);

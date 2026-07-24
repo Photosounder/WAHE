@@ -26,12 +26,21 @@ enum wahe_func_id
 extern const char *wahe_eo_name[];
 extern const char *wahe_func_name[];
 
+enum wahe_module_type
+{
+	WAHE_MODULE_NONE,
+	WAHE_MODULE_WASMTIME,
+	WAHE_MODULE_WASM_TO_NATIVE,
+	WAHE_MODULE_NATIVE
+};
+
 typedef struct
 {
 	int valid;
 	char *module_name;
 	char *wahe_name;
 	int module_id;
+	enum wahe_module_type type;
 	rl_mutex_t mutex;
 	void *parent_group;	// wahe_group_t *
 	#ifdef H_ROUZICLIB
