@@ -1,5 +1,12 @@
 char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 {
+	// Reject execution without a valid chain and owning group
+	if (chain == NULL || chain->parent_group == NULL)
+	{
+		fprintf_rl(stderr, "Cannot execute chain at %p without an owning module group\n", (void *) chain);
+		return NULL;
+	}
+
 	wahe_group_t *group = chain->parent_group;
 	char *last_msg = NULL;
 
@@ -53,8 +60,17 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 						// Convert the module return address to a host pointer and copy the message
 						if (src_addr)
 						{
-							const char *src_message = src_module->type == WAHE_MODULE_NATIVE ? (const char *) src_addr : (const char *) &src_module->memory_ptr[src_addr];
-							eo->dst_msg_addr = wahe_copy_message_between_modules(src_module, src_message, dst_module);
+							const char *src_message = NULL;
+							if (src_module->type == WAHE_MODULE_NATIVE)
+								src_message = (const char *) src_addr;
+							else if (src_module->type == WAHE_MODULE_WASMTIME || src_module->type == WAHE_MODULE_WASM_TO_NATIVE)
+								src_message = (const char *) &src_module->memory_ptr[src_addr];
+							else
+								fprintf_rl(stderr, "Cannot read a return message from module %s with invalid module type %d\n", src_module->module_name, src_module->type);
+
+							// Copy only addresses with known module semantics
+							if (src_message)
+								eo->dst_msg_addr = wahe_copy_message_between_modules(src_module, src_message, dst_module);
 						}
 						break;
 

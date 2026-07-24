@@ -122,6 +122,11 @@ static int wahe_init_module_memory(wahe_module_t *ctx)
 	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
 	{
 		ctx->memory_ptr = *ctx->native_memory;
+		if (ctx->memory_ptr == NULL)
+		{
+			fprintf_rl(stderr, "Wasm-to-native module %s did not initialise its exported memory pointer\n", ctx->module_name);
+			return 0;
+		}
 		if (ctx->memory_size_addr)
 			ctx->memory_size = *ctx->memory_size_addr;
 		return 1;
@@ -133,7 +138,10 @@ static int wahe_init_module_memory(wahe_module_t *ctx)
 
 	// Reject module types without Wasmtime memory
 	if (ctx->type != WAHE_MODULE_WASMTIME)
+	{
+		fprintf_rl(stderr, "Cannot initialise memory for module %s with invalid module type %d\n", ctx->module_name, ctx->type);
 		return 0;
+	}
 
 	#ifdef WAHE_WASMTIME
 	wasmtime_extern_t item;
@@ -160,9 +168,29 @@ static int wahe_init_module_memory(wahe_module_t *ctx)
 	return 1;
 
 	#else
+	fprintf_rl(stderr, "Cannot initialise Wasmtime memory for module %s because WAHE was built without Wasmtime support\n", ctx->module_name);
 	return 0;
 	#endif // WAHE_WASMTIME
 
+}
+
+static void wahe_refresh_module_memory_size(wahe_module_t *ctx)
+{
+	#ifdef WAHE_WASMTIME
+	// Refresh only Wasmtime memories whose committed size can grow
+	if (ctx == NULL || ctx->type != WAHE_MODULE_WASMTIME)
+		return;
+
+	// Report and store changes without updating the fixed memory pointer
+	size_t current_size = wasmtime_memory_data_size(ctx->context, &ctx->memory);
+	if (current_size != ctx->memory_size)
+	{
+		fprintf_rl(stdout, "Memory of module #%d %s grew from %zu kB to %zu kB\n", ctx->module_id, ctx->module_name, ctx->memory_size >> 10, current_size >> 10);
+		ctx->memory_size = current_size;
+	}
+	#else
+	(void) ctx;
+	#endif
 }
 
 size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_name, int verbosity)
@@ -197,6 +225,11 @@ size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_nam
 			fprintf_rl(stderr, "Error in module %s: symbol %s not found in wasmtime_linker_get()\n", ctx->module_name, symbol_name);
 
 		#endif // WAHE_WASMTIME
+	}
+	else
+	{
+		// Report symbol lookup with an uninitialized module type
+		fprintf_rl(stderr, "Cannot find symbol %s in module %s with invalid module type %d\n", symbol_name, ctx->module_name, ctx->type);
 	}
 
 	return addr;
@@ -241,6 +274,11 @@ void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_f
 		if (verbosity == 1)
 			fprintf_rl(stdout, "Module #%d %s: %s() found\n", ctx->module_id, ctx->module_name, func_name);
 		#endif // WAHE_WASMTIME
+	}
+	else
+	{
+		// Report function lookup with an uninitialized module type
+		fprintf_rl(stderr, "Cannot find function %s() in module %s with invalid module type %d\n", func_name, ctx->module_name, ctx->type);
 	}
 }
 
@@ -305,12 +343,40 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 {
 	size_t ret_val;
 
-	if (!ctx->valid)
+	// Reject invalid call metadata
+	if (ctx == NULL)
+	{
+		fprintf_rl(stderr, "Cannot call module function %d without a module context\n", func_id);
 		return 0;
+	}
+	if (func_id <= WAHE_FUNC_NONE || func_id >= WAHE_FUNC_COUNT)
+	{
+		fprintf_rl(stderr, "Cannot call invalid function ID %d in module %s\n", func_id, ctx->module_name);
+		return 0;
+	}
+	if (arg_count < 0 || arg_count > 2 || (arg_count && arg == NULL))
+	{
+		fprintf_rl(stderr, "Cannot call %s:%s() with %d arguments at %p\n", ctx->module_name, wahe_func_name[func_id], arg_count, (void *) arg);
+		return 0;
+	}
+
+	// Reject calls into modules that did not initialise successfully
+	if (!ctx->valid)
+	{
+		fprintf_rl(stderr, "Cannot call %s:%s() because the module is invalid\n", ctx->module_name, wahe_func_name[func_id]);
+		return 0;
+	}
 
 	// Native call
 	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 	{
+		// Reject calls to functions the dynamic library did not export
+		if (ctx->dl_func[func_id] == NULL)
+		{
+			fprintf_rl(stderr, "Cannot call %s:%s() because the function is not exported\n", ctx->module_name, wahe_func_name[func_id]);
+			return 0;
+		}
+
 		switch (func_id)
 		{
 			case WAHE_FUNC_MALLOC:
@@ -349,6 +415,13 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	if (ctx->cita_time_addr)
 		*(int32_t*) &ctx->memory_ptr[ctx->cita_time_addr] = get_time_hr() * 100.;
 
+	// Reject module types that cannot use Wasmtime dispatch
+	if (ctx->type != WAHE_MODULE_WASMTIME)
+	{
+		fprintf_rl(stderr, "Cannot call %s:%s() with invalid module type %d\n", ctx->module_name, wahe_func_name[func_id], ctx->type);
+		return 0;
+	}
+
 	#ifdef WAHE_WASMTIME
 	wahe_chain_t *chain = wahe_cur_chain;
 	wasmtime_error_t *error;
@@ -356,7 +429,10 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	wasmtime_val_t ret[1], param[2];
 
 	if (ctx->func[func_id].store_id == 0)
+	{
+		fprintf_rl(stderr, "Cannot call %s:%s() because the Wasmtime function is not exported\n", ctx->module_name, wahe_func_name[func_id]);
 		return 0;
+	}
 
 	// Set params
 	for (int i=0; i < arg_count; i++)
@@ -376,6 +452,10 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	if (chain)
 		chain->current_func = prev_func;
 	wahe_bench_point("function returned", -1);
+
+	// Synchronize memory growth performed during the module call
+	wahe_refresh_module_memory_size(ctx);
+
 	if (error || trap)
 	{
 		fprintf_rl(stderr, "Calling %s:%s() failed\n", ctx->module_name, wahe_func_name[func_id]);
@@ -396,13 +476,18 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	return wasmtime_val_get_address(ret[0]);
 
 	#else
+	fprintf_rl(stderr, "Cannot call Wasmtime function %s:%s() because WAHE was built without Wasmtime support\n", ctx->module_name, wahe_func_name[func_id]);
 	return 0;
 	#endif // WAHE_WASMTIME
 }
 
 size_t call_module_malloc(wahe_module_t *ctx, size_t size)
 {
-	return call_module_func_core(ctx, &size, 1, WAHE_FUNC_MALLOC);
+	// Report allocation failure with its module and requested size
+	size_t address = call_module_func_core(ctx, &size, 1, WAHE_FUNC_MALLOC);
+	if (address == 0)
+		fprintf_rl(stderr, "module_malloc() in module %s failed to allocate %zu bytes\n", ctx ? ctx->module_name : "(?)", size);
+	return address;
 }
 
 size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
@@ -416,7 +501,7 @@ size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
 
 	// Check NULL result
 	if (ret == 0)
-		fprintf_rl(stderr, "call_module_realloc(%s, %#zx, %zd) returned NULL\n", ctx->module_name, address, size);
+		fprintf_rl(stderr, "call_module_realloc(%s, %#zx, %zu) returned NULL\n", ctx->module_name, address, size);
 
 	return ret;
 }
@@ -470,8 +555,12 @@ int wahe_message_to_raster(wahe_module_t *ctx, size_t msg_addr, raster_t *r)
 {
 	size_t raster_size = 0, raster_address = 0;
 
+	// Report missing display messages
 	if (msg_addr == 0)
+	{
+		fprintf_rl(stderr, "Module %s did not return a framebuffer message for display\n", ctx->module_name);
 		return 0;
+	}
 
 	int ret_mode = get_raster_mode(*r);
 
@@ -491,7 +580,17 @@ int wahe_message_to_raster(wahe_module_t *ctx, size_t msg_addr, raster_t *r)
 	}
 
 	if (raster_address == 0)
+	{
+		fprintf_rl(stderr, "Framebuffer message from module %s does not contain a valid framebuffer location\n", ctx->module_name);
 		return 0;
+	}
+
+	// Reject framebuffer ranges outside active module memory
+	if (ctx->memory_ptr == NULL || raster_address > ctx->memory_size || raster_size > ctx->memory_size - raster_address)
+	{
+		fprintf_rl(stderr, "Framebuffer from module %s uses %zu bytes at offset %#zx outside its %zu-byte active memory\n", ctx->module_name, raster_size, raster_address, ctx->memory_size);
+		return 0;
+	}
 
 	// Update the host-side raster for the module framebuffer
 	*r = make_raster(&ctx->memory_ptr[raster_address], r->dim, r->dim, ret_mode);
@@ -689,7 +788,11 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		ctx->valid = 1;
 
 		// Store the module's fixed memory address
-		wahe_init_module_memory(ctx);
+		if (!wahe_init_module_memory(ctx))
+		{
+			ctx->valid = 0;
+			return;
+		}
 
 		// Set the type of module addresses (currently always 32-bit)
 		ctx->address_type = WASMTIME_I32;
@@ -709,14 +812,23 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	{
 		// Use the native ABI while discovering the dynamic library type
 		ctx->type = WAHE_MODULE_NATIVE;
+		ctx->valid = 1;
 
 		// Find functions from the native module
 		wahe_init_all_module_symbols(ctx);
 
-		ctx->valid = 1;
-
 		// Store the module's fixed memory address
-		wahe_init_module_memory(ctx);
+		if (!wahe_init_module_memory(ctx))
+		{
+			ctx->valid = 0;
+			return;
+		}
+	}
+	else
+	{
+		// Report dynamic libraries that could not be loaded
+		fprintf_rl(stderr, "Could not load module %s from '%s' as Wasm or a dynamic library\n", ctx->module_name, path);
+		return;
 	}
 
 	// Send pointer to wahe_run_command() if the module is not WASM
@@ -748,19 +860,44 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 
 void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr)
 {
+	// Reject invalid source modules
 	if (src_module && src_module->valid == 0)
+	{
+		fprintf_rl(stderr, "Cannot copy %zu bytes from invalid module %s\n", copy_size, src_module->module_name);
 		return;
+	}
 
+	// Reject invalid destination modules
 	if (dst_module && dst_module->valid == 0)
+	{
+		fprintf_rl(stderr, "Cannot copy %zu bytes to invalid module %s\n", copy_size, dst_module->module_name);
 		return;
+	}
+
+	// Synchronize Wasmtime sizes before validating module-relative ranges
+	wahe_refresh_module_memory_size(src_module);
+	wahe_refresh_module_memory_size(dst_module);
 
 	// Reject source ranges outside the module's active memory
 	if (src_module && (src_module->memory_ptr == NULL || src_addr > src_module->memory_size || copy_size > src_module->memory_size - src_addr))
+	{
+		fprintf_rl(stderr, "Cannot copy %zu bytes from offset %#zx in module %s with a %zu-byte active memory\n", copy_size, src_addr, src_module->module_name, src_module->memory_size);
 		return;
+	}
 
 	// Reject destination ranges outside the module's active memory
 	if (dst_module && (dst_module->memory_ptr == NULL || dst_addr > dst_module->memory_size || copy_size > dst_module->memory_size - dst_addr))
+	{
+		fprintf_rl(stderr, "Cannot copy %zu bytes to offset %#zx in module %s with a %zu-byte active memory\n", copy_size, dst_addr, dst_module->module_name, dst_module->memory_size);
 		return;
+	}
+
+	// Reject null direct host addresses
+	if ((src_module == NULL && src_addr == 0 && copy_size) || (dst_module == NULL && dst_addr == 0 && copy_size))
+	{
+		fprintf_rl(stderr, "Cannot copy %zu bytes using direct host addresses %#zx to %#zx\n", copy_size, src_addr, dst_addr);
+		return;
+	}
 
 	// Copy
 	memcpy(dst_module ? &dst_module->memory_ptr[dst_addr] : (void *) dst_addr, src_module ? &src_module->memory_ptr[src_addr] : (void *) src_addr, copy_size);
@@ -770,7 +907,13 @@ size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *
 {
 	// Reject invalid module-to-module message transfers
 	if (src_module == NULL || dst_module == NULL || src_message == NULL || src_module->valid == 0 || dst_module->valid == 0)
+	{
+		fprintf_rl(stderr, "Cannot copy a message between modules %s and %s using source pointer %p\n",
+				src_module ? src_module->module_name : "(null)",
+				dst_module ? dst_module->module_name : "(null)",
+				(const void *) src_message);
 		return 0;
+	}
 
 	// Prefix the message with the source module's actual host memory address
 	return module_sprintf_alloc(dst_module, "From memory %#zx\n%s", (size_t) src_module->memory_ptr, src_message);
@@ -794,17 +937,41 @@ size_t wahe_load_raw_file(wahe_module_t *ctx, const char *path, size_t *size)
 	}
 
 	// Get file size
-	fseek(in_file, 0, SEEK_END);
-	fsize = ftell(in_file);
+	if (fseek(in_file, 0, SEEK_END) != 0)
+	{
+		fprintf_rl(stderr, "Could not seek to the end of file '%s'\n", path);
+		fclose(in_file);
+		return 0;
+	}
+	long file_size = ftell(in_file);
+	if (file_size < 0 || (uintmax_t) file_size >= SIZE_MAX)
+	{
+		fprintf_rl(stderr, "Could not determine an allocatable size for file '%s'\n", path);
+		fclose(in_file);
+		return 0;
+	}
+	fsize = (size_t) file_size;
 	rewind(in_file);
 
 	// Alloc data buffer
 	data_addr = call_module_malloc(ctx, fsize+1);
+	if (data_addr == 0)
+	{
+		fprintf_rl(stderr, "Cannot load file '%s' because module %s could not allocate %zu bytes\n", path, ctx->module_name, fsize+1);
+		fclose(in_file);
+		return 0;
+	}
 	data = &ctx->memory_ptr[data_addr];
 
 	// Read all the data at once
-	fread(data, 1, fsize, in_file);
+	size_t read_size = fread(data, 1, fsize, in_file);
 	fclose(in_file);
+	if (read_size != fsize)
+	{
+		fprintf_rl(stderr, "Reading file '%s' stopped after %zu of %zu bytes\n", path, read_size, fsize);
+		call_module_free(ctx, data_addr);
+		return 0;
+	}
 
 	if (size)
 		*size = fsize;
@@ -925,8 +1092,12 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 	wahe_group_t *group = NULL;
 	size_t return_msg_addr = 0;
 
+	// Report callbacks made without a message
 	if (message == NULL)
+	{
+		fprintf_rl(stderr, "Module %s called wahe_run_command() without a message\n", ctx ? ctx->module_name : "(unidentified)");
 		return 0;
+	}
 
 	wahe_chain_t *chain = wahe_cur_chain;
 	if (ctx)
@@ -1054,6 +1225,16 @@ wasm_trap_t *wahe_run_command(void *env, wasmtime_caller_t *caller, const wasmti
 {
 	wahe_module_t *ctx = env;
 	size_t return_msg_addr = 0;
+
+	// Reject malformed callback invocations
+	if (ctx == NULL || arg == NULL || result == NULL || arg_count < 1 || result_count < 1)
+	{
+		fprintf_rl(stderr, "Malformed Wasmtime wahe_run_command() callback with module %p, %zu arguments and %zu results\n", (void *) ctx, arg_count, result_count);
+		return NULL;
+	}
+
+	// Synchronize memory growth before processing commands from the module
+	wahe_refresh_module_memory_size(ctx);
 
 	// Parse message
 	if (wasmtime_val_get_address(arg[0]))

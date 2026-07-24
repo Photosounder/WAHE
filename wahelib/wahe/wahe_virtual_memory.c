@@ -16,7 +16,10 @@ static int wahe_align_size_to_page(size_t size, size_t page_size, size_t *aligne
 {
 	// Reject invalid page sizes and alignment overflow
 	if (page_size == 0 || size > SIZE_MAX - (page_size - 1))
+	{
+		fprintf_rl(stderr, "Cannot align virtual-memory size %zu to page size %zu\n", size, page_size);
 		return 0;
+	}
 
 	// Round the size up to the next page boundary
 	*aligned_size = ((size + page_size - 1) / page_size) * page_size;
@@ -31,22 +34,33 @@ int wahe_virtual_memory_commit(void *memory, size_t commit_size)
 
 	// Reject commits without a reserved base address
 	if (memory == NULL)
+	{
+		fprintf_rl(stderr, "Cannot commit %zu bytes without a virtual-memory reservation\n", commit_size);
 		return 0;
+	}
 
 	#ifdef _WIN32
 	// Commit the requested prefix with read and write access
-	return VirtualAlloc(memory, commit_size, MEM_COMMIT, PAGE_READWRITE) == memory;
+	int success = VirtualAlloc(memory, commit_size, MEM_COMMIT, PAGE_READWRITE) == memory;
 	#else
 	// Commit the requested prefix by making its reserved pages accessible
-	return mprotect(memory, commit_size, PROT_READ | PROT_WRITE) == 0;
+	int success = mprotect(memory, commit_size, PROT_READ | PROT_WRITE) == 0;
 	#endif
+
+	// Report operating-system commitment failures
+	if (!success)
+		fprintf_rl(stderr, "Committing %zu bytes at %p failed\n", commit_size, memory);
+	return success;
 }
 
 int wahe_virtual_memory_decommit(void *memory, size_t commit_size, size_t previous_commit_size)
 {
 	// Reject invalid shrinking ranges
 	if (commit_size > previous_commit_size || memory == NULL)
+	{
+		fprintf_rl(stderr, "Cannot decommit virtual memory at %p from %zu bytes to %zu bytes\n", memory, previous_commit_size, commit_size);
 		return 0;
+	}
 	if (commit_size == previous_commit_size)
 		return 1;
 
@@ -63,20 +77,31 @@ int wahe_virtual_memory_decommit(void *memory, size_t commit_size, size_t previo
 
 	#ifdef _WIN32
 	// Decommit the unused Windows pages while retaining their address range
-	return VirtualFree(decommit_address, decommit_size, MEM_DECOMMIT) != 0;
+	int success = VirtualFree(decommit_address, decommit_size, MEM_DECOMMIT) != 0;
 	#else
 	// Discard the unused POSIX pages before making them inaccessible
 	if (madvise(decommit_address, decommit_size, MADV_DONTNEED) != 0)
+	{
+		fprintf_rl(stderr, "Discarding %zu bytes at %p before decommitment failed\n", decommit_size, decommit_address);
 		return 0;
-	return mprotect(decommit_address, decommit_size, PROT_NONE) == 0;
+	}
+	int success = mprotect(decommit_address, decommit_size, PROT_NONE) == 0;
 	#endif
+
+	// Report operating-system decommitment failures
+	if (!success)
+		fprintf_rl(stderr, "Decommitting %zu bytes at %p failed\n", decommit_size, decommit_address);
+	return success;
 }
 
 void *wahe_virtual_memory_alloc(size_t commit_size, size_t reserve_size)
 {
 	// Reject empty or inconsistent ranges
 	if (reserve_size == 0 || commit_size > reserve_size)
+	{
+		fprintf_rl(stderr, "Cannot reserve %zu bytes of virtual memory with a %zu-byte initial commitment\n", reserve_size, commit_size);
 		return NULL;
+	}
 
 	#ifdef _WIN32
 	// Reserve a fixed address range without committing its pages
@@ -88,8 +113,15 @@ void *wahe_virtual_memory_alloc(size_t commit_size, size_t reserve_size)
 		memory = NULL;
 	#endif
 
+	// Report operating-system reservation failures
+	if (memory == NULL)
+	{
+		fprintf_rl(stderr, "Reserving %zu bytes of virtual memory failed\n", reserve_size);
+		return NULL;
+	}
+
 	// Commit the initially requested prefix
-	if (memory && !wahe_virtual_memory_commit(memory, commit_size))
+	if (!wahe_virtual_memory_commit(memory, commit_size))
 	{
 		wahe_virtual_memory_free(memory, reserve_size);
 		return NULL;
@@ -107,11 +139,19 @@ int wahe_virtual_memory_free(void *memory, size_t reserve_size)
 	#ifdef _WIN32
 	// Release the complete Windows reservation
 	(void) reserve_size;
-	return VirtualFree(memory, 0, MEM_RELEASE) != 0;
+	int success = VirtualFree(memory, 0, MEM_RELEASE) != 0;
 	#else
 	// Release the complete POSIX reservation
 	if (reserve_size == 0)
+	{
+		fprintf_rl(stderr, "Cannot release virtual memory at %p without its reservation size\n", memory);
 		return 0;
-	return munmap(memory, reserve_size) == 0;
+	}
+	int success = munmap(memory, reserve_size) == 0;
 	#endif
+
+	// Report operating-system release failures
+	if (!success)
+		fprintf_rl(stderr, "Releasing %zu bytes of virtual memory at %p failed\n", reserve_size, memory);
+	return success;
 }

@@ -13,6 +13,13 @@ static enum wahe_host_cmd_result wahe_hcmd_init_memory(wahe_module_t *ctx, const
 	if (end == 0)
 		return WAHE_HOST_CMD_NOT_HANDLED;
 
+	// Reject attempts to replace an existing fixed memory reservation
+	if (ctx->memory_ptr || ctx->memory_reserve_size)
+	{
+		fprintf_rl(stderr, "Module %s attempted to initialise virtual memory more than once\n", ctx->module_name);
+		return WAHE_HOST_CMD_HANDLED;
+	}
+
 	// Allocate the module's first and only memory reservation
 	uint8_t *memory = wahe_virtual_memory_alloc(initial_commit_size, reserve_size);
 
@@ -141,6 +148,11 @@ static enum wahe_host_cmd_result wahe_hcmd_run_chain(wahe_module_t *ctx, const c
 		if (end_msg)
 			*return_msg_addr = wahe_copy_message_between_modules(end_module, end_msg, ctx);
 	}
+	else
+	{
+		// Report requests for chains that do not exist
+		fprintf_rl(stderr, "Module %s attempted to run unknown chain '%s'\n", ctx->module_name, name);
+	}
 
 	// Release the parsed name and return the chain result
 	free(name);
@@ -186,6 +198,9 @@ static enum wahe_host_cmd_result wahe_hcmd_get_memory_address(wahe_module_t *ctx
 	// Return the host address when memory exists
 	if (ctx->memory_ptr)
 		*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) ctx->memory_ptr);
+	// Report requests made before memory initialization
+	else
+		fprintf_rl(stderr, "Module %s requested its memory address before memory was initialised\n", ctx->module_name);
 	return WAHE_HOST_CMD_HANDLED;
 }
 
@@ -198,6 +213,9 @@ static enum wahe_host_cmd_result wahe_hcmd_get_stack_pointer_address(wahe_module
 	// Return the host address when the exported pointer exists
 	if (ctx->stack_ptr_addr)
 		*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", (size_t) ctx->stack_ptr_addr);
+	// Report requests for metadata the module does not provide
+	else
+		fprintf_rl(stderr, "Module %s requested a stack pointer address that it does not export\n", ctx->module_name);
 	return WAHE_HOST_CMD_HANDLED;
 }
 
@@ -210,6 +228,9 @@ static enum wahe_host_cmd_result wahe_hcmd_get_heap_base(wahe_module_t *ctx, con
 	// Return the heap base when it exists
 	if (ctx->heap_base)
 		*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->heap_base);
+	// Report requests for unavailable module metadata
+	else
+		fprintf_rl(stderr, "Module %s requested a heap base that is unavailable\n", ctx->module_name);
 	return WAHE_HOST_CMD_HANDLED;
 }
 
@@ -222,6 +243,9 @@ static enum wahe_host_cmd_result wahe_hcmd_get_data_end(wahe_module_t *ctx, cons
 	// Return the data end when it exists
 	if (ctx->data_end)
 		*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->data_end);
+	// Report requests for unavailable module metadata
+	else
+		fprintf_rl(stderr, "Module %s requested a data end that is unavailable\n", ctx->module_name);
 	return WAHE_HOST_CMD_HANDLED;
 }
 
@@ -234,6 +258,9 @@ static enum wahe_host_cmd_result wahe_hcmd_get_stack_base(wahe_module_t *ctx, co
 	// Return the stack base when it exists
 	if (ctx->stack_base)
 		*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->stack_base);
+	// Report requests for unavailable module metadata
+	else
+		fprintf_rl(stderr, "Module %s requested a stack base that is unavailable\n", ctx->module_name);
 	return WAHE_HOST_CMD_HANDLED;
 }
 
@@ -248,6 +275,11 @@ static enum wahe_host_cmd_result wahe_hcmd_get_stack_pointer(wahe_module_t *ctx,
 	{
 		size_t ptr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
 		*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ptr);
+	}
+	else
+	{
+		// Report use of a Wasmtime-only metadata command
+		fprintf_rl(stderr, "Module %s requested its Wasmtime stack pointer with module type %d\n", ctx->module_name, ctx->type);
 	}
 	return WAHE_HOST_CMD_HANDLED;
 }
@@ -305,7 +337,11 @@ static enum wahe_host_cmd_result wahe_hcmd_save_raw_file(wahe_module_t *ctx, con
 	char *path = make_string_copy_len(&(*line)[path_start], path_end-path_start);
 	int ret = save_raw_file(path, "wb", &ctx->memory_ptr[data_addr], data_size);
 	if (ret == 0)
+	{
+		// Report file writing failures to both stderr and the module
+		fprintf_rl(stderr, "Module %s could not save %zu bytes at offset %#zx to '%s'\n", ctx->module_name, data_size, data_addr, path);
 		*return_msg_addr = module_sprintf_alloc(ctx, "Error: Couldn't write to file %s", path);
+	}
 	else
 		*return_msg_addr = module_sprintf_alloc(ctx, "Done.");
 	free(path);
