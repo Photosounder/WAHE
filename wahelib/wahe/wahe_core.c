@@ -302,9 +302,9 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 		if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
 		{
 			// Send the host callback to the translated Wasm runtime
-			void (*wasm_decomp_init)(int32_t, void *) = dynlib_find_symbol(ctx->native, "wasm_decomp_init");
+			void (*wasm_decomp_init)(void *, void *) = dynlib_find_symbol(ctx->native, "wasm_decomp_init");
 			if (wasm_decomp_init)
-				wasm_decomp_init(ctx->module_id, wahe_run_command_with_id_native);
+				wasm_decomp_init(ctx, wahe_run_command_with_id_native);
 
 			// Initialise the translated module's memory buffer
 			call_module_free(ctx, 0);
