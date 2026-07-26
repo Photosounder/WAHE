@@ -89,6 +89,40 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 			char *module_path = make_string_copy_len(&line[n[2]], n[3]-n[2]);
 			char *module_name = make_string_copy_len(&line[n[0]], n[1]-n[0]);
 
+			// Reject declarations without the closing path quote
+			if (line[n[3]] != '"')
+			{
+				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Module path is missing its closing quote in \"%s\".\n", filepath, il, line);
+				free(module_path);
+				free(module_name);
+				continue;
+			}
+
+			// Parse the optional Wasmtime runner count
+			size_t runner_count = 1;
+			int runner_count_end = 0;
+			int runner_count_valid = 1;
+			const char *module_suffix = &line[n[3]+1];
+			if (strstr(module_suffix, ", runners") == module_suffix)
+			{
+				sscanf(module_suffix, ", runners %zu%n", &runner_count, &runner_count_end);
+				const char *runner_text = &module_suffix[sizeof(", runners")-1];
+				while (*runner_text == ' ' || *runner_text == '\t')
+					runner_text++;
+				if (*runner_text < '0' || *runner_text > '9' || runner_count_end == 0)
+					runner_count_valid = 0;
+				for (const char *end = &module_suffix[runner_count_end]; *end; end++)
+					if (*end != ' ' && *end != '\t' && *end != '\r')
+						runner_count_valid = 0;
+			}
+			if (runner_count == 0 || !runner_count_valid)
+			{
+				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Invalid module runner count in \"%s\".\n", filepath, il, line);
+				free(module_path);
+				free(module_name);
+				continue;
+			}
+
 			// Add symbol to table
 			if (wahe_find_symbol_in_table(&symb_module, module_name) != -1)
 				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Module symbol name \"%s\" already taken.\n", filepath, il, module_name);
@@ -99,11 +133,11 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 
 			// Load module
 			if (check_file_is_readable(module_path))
-				wahe_module_init(group, is, &group->module[is], module_path);
+				wahe_module_init(group, is, &group->module[is], module_path, runner_count);
 			else
 			{
 				char *actual_path = append_name_to_path(NULL, dir_path, module_path);
-				wahe_module_init(group, is, &group->module[is], actual_path);
+				wahe_module_init(group, is, &group->module[is], actual_path, runner_count);
 			}
 			free(module_path);
 
@@ -240,6 +274,15 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 						bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Order function attribute \"%s\" not previously defined.\n", filepath, il, arg_name);
 				}
 
+				// Set the zero-indexed module runner
+				if (strcmp(attribute, "runner") == 0)
+				{
+					int runner_end = 0;
+					sscanf(arg_name, "%zu%n", &chain->exec_order[is].runner_id, &runner_end);
+					if (arg_name[0] < '0' || arg_name[0] > '9' || runner_end == 0 || arg_name[runner_end] != '\0')
+						bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Order runner attribute \"%s\" is not a zero-indexed integer.\n", filepath, il, arg_name);
+				}
+
 				// Set image display
 				if (strcmp(attribute, "display") == 0)
 				{
@@ -254,6 +297,13 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 				if (n[2] == 0)
 					break;
 			}
+
+			// Validate the selected runner after all order attributes are known
+			wahe_exec_order_t *eo = &chain->exec_order[is];
+			if (eo->type == WAHE_EO_MODULE_FUNC && eo->module_id >= 0 && (size_t) eo->module_id < group->module_count &&
+				eo->runner_id >= group->module[eo->module_id].runner_count)
+				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Runner %zu is outside module %s's %zu runners.\n",
+					filepath, il, eo->runner_id, group->module[eo->module_id].wahe_name, group->module[eo->module_id].runner_count);
 		}
 
 		// Connections between orders

@@ -34,7 +34,24 @@ enum wahe_module_type
 	WAHE_MODULE_NATIVE
 };
 
+typedef struct wahe_module_t wahe_module_t;
+
+#ifdef WAHE_WASMTIME
 typedef struct
+{
+	wahe_module_t *module;
+	size_t runner_id;
+	rl_mutex_t mutex;
+	wasmtime_store_t *store;
+	wasmtime_context_t *context;
+	wasmtime_linker_t *linker;
+	wasmtime_memory_t memory;
+	wasmtime_global_t stack_pointer;
+	wasmtime_func_t func[WAHE_FUNC_COUNT];
+} wahe_wasmtime_runner_t;
+#endif // WAHE_WASMTIME
+
+struct wahe_module_t
 {
 	int valid;
 	char *module_name;
@@ -43,6 +60,7 @@ typedef struct
 	enum wahe_module_type type;
 	rl_mutex_t mutex;
 	void *parent_group;	// wahe_group_t *
+	size_t runner_count;
 	#ifdef H_ROUZICLIB
 	textedit_t input_te;
 	#endif
@@ -55,20 +73,17 @@ typedef struct
 	// Specific to WASM modules
 	#ifdef WAHE_WASMTIME
 	wasm_engine_t *engine;
-	wasmtime_store_t *store;
-	wasmtime_context_t *context;
 	wasmtime_module_t *module;
-	wasi_config_t *wasi_config;
-	wasmtime_linker_t *linker;
-	wasmtime_memory_t memory;
+	wasmtime_sharedmemory_t *shared_memory;
+	wahe_wasmtime_runner_t *runner;
+	int memory_is_shared;
 	wasmtime_valkind_t address_type;
-	wasmtime_func_t func[WAHE_FUNC_COUNT];
 	#endif // WAHE_WASMTIME
 
 	// Specific to native modules
 	void *native, *dl_func[WAHE_FUNC_COUNT];
 	uint8_t **native_memory;	// specific to wasm-to-native
-} wahe_module_t;
+};
 
 #ifdef H_ROUZICLIB
 typedef struct
@@ -116,6 +131,7 @@ typedef struct
 	enum wahe_eo_type type;
 	int module_id, display_id;
 	enum wahe_func_id func_id;
+	size_t runner_id;
 	size_t dst_msg_addr, ret_msg_addr;
 
 	// Command processors
@@ -167,6 +183,10 @@ extern int wahe_virtual_memory_free(void *memory, size_t reserve_size);
 extern size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_name, int verbosity);
 extern void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_func_id func_id, int verbosity);
 extern void wahe_init_all_module_symbols(wahe_module_t *ctx);
+extern size_t call_module_malloc_on_runner(wahe_module_t *ctx, size_t runner_id, size_t size);
+extern size_t call_module_realloc_on_runner(wahe_module_t *ctx, size_t runner_id, size_t address, size_t size);
+extern void call_module_free_on_runner(wahe_module_t *ctx, size_t runner_id, size_t address);
+extern char *call_module_func_on_runner(wahe_module_t *ctx, size_t runner_id, size_t message_addr, enum wahe_func_id func_id, int call_from_eo);
 extern size_t call_module_malloc(wahe_module_t *ctx, size_t size);
 extern size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size);
 extern void call_module_free(wahe_module_t *ctx, size_t address);
@@ -181,8 +201,9 @@ extern size_t module_vsprintf_alloc(wahe_module_t *ctx, const char *format, va_l
 extern size_t module_sprintf_alloc(wahe_module_t *ctx, const char* format, ...);
 extern char *wahe_send_input(wahe_module_t *ctx, const char *format, ...);
 extern void wahe_register_host_commands(wahe_group_t *group);
-extern void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path);
+extern void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count);
 extern void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr);
+extern size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module, size_t dst_runner_id);
 extern size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module);
 #ifdef H_ROUZICLIB
 extern void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int display_id, int conn_id);

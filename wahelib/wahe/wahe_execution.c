@@ -1,5 +1,8 @@
 char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 {
+	// Preserve the caller's chain across nested execution
+	wahe_chain_t *previous_chain = wahe_cur_chain;
+
 	// Reject execution without a valid chain and owning group
 	if (chain == NULL || chain->parent_group == NULL)
 	{
@@ -70,7 +73,7 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 
 							// Copy only addresses with known module semantics
 							if (src_message)
-								eo->dst_msg_addr = wahe_copy_message_between_modules(src_module, src_message, dst_module);
+								eo->dst_msg_addr = wahe_copy_message_between_modules_on_runner(src_module, src_message, dst_module, eo->runner_id);
 						}
 						break;
 
@@ -80,8 +83,9 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 						if (input_msg)
 						{
 							size_t copy_size = strlen(input_msg) + 1;
-							eo->dst_msg_addr = call_module_malloc(dst_module, copy_size);
-							wahe_copy_between_memories(NULL, (size_t) input_msg, copy_size, dst_module, eo->dst_msg_addr);
+							eo->dst_msg_addr = call_module_malloc_on_runner(dst_module, eo->runner_id, copy_size);
+							if (eo->dst_msg_addr)
+								wahe_copy_between_memories(NULL, (size_t) input_msg, copy_size, dst_module, eo->dst_msg_addr);
 						}
 						break;
 
@@ -93,11 +97,11 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 			// Call function
 			chain->current_eo = ie;
 			chain->current_cmd_proc_id = 0;
-			last_msg = call_module_func(exec_module, eo->dst_msg_addr, eo->func_id, 1);
+			last_msg = call_module_func_on_runner(exec_module, eo->runner_id, eo->dst_msg_addr, eo->func_id, 1);
 			chain->current_eo = -1;
 
 			// Free the input message after the module function returns
-			call_module_free(exec_module, eo->dst_msg_addr);
+			call_module_free_on_runner(exec_module, eo->runner_id, eo->dst_msg_addr);
 			eo->dst_msg_addr = 0;
 		}
 
@@ -130,6 +134,8 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 		}
 	}
 
+	// Restore the caller's chain after nested chain execution
+	wahe_cur_chain = previous_chain;
 	return last_msg;
 }
 

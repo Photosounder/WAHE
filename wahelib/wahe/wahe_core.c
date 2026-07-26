@@ -33,6 +33,12 @@ const char *wahe_func_name[] =
 
 _Thread_local wahe_chain_t *wahe_cur_chain = NULL;
 
+#ifdef WAHE_WASMTIME
+static _Thread_local wahe_wasmtime_runner_t *wahe_cur_wasmtime_runner = NULL;
+static wasmtime_val_t wasmtime_val_set_address(wahe_module_t *ctx, size_t address);
+static size_t wasmtime_val_get_address(wasmtime_val_t val);
+#endif
+
 void wahe_bench_point(const char *label, int depth)
 {
 	return;
@@ -67,7 +73,36 @@ void wahe_bench_point(const char *label, int depth)
 }
 
 #ifdef WAHE_WASMTIME
-void fprint_wasmtime_error(wahe_module_t *ctx, wasmtime_error_t *error, wasm_trap_t *trap)
+static wahe_wasmtime_runner_t *wahe_get_wasmtime_runner(wahe_module_t *ctx, size_t runner_id, const char *operation)
+{
+	// Reject runner access outside a Wasmtime module
+	if (ctx == NULL || ctx->type != WAHE_MODULE_WASMTIME)
+	{
+		fprintf_rl(stderr, "Cannot %s with a non-Wasmtime module\n", operation);
+		return NULL;
+	}
+
+	// Reject runner indexes outside the module's runner array
+	if (ctx->runner == NULL || runner_id >= ctx->runner_count)
+	{
+		fprintf_rl(stderr, "Cannot %s with runner %zu in module %s, which has %zu runners\n", operation, runner_id, ctx->module_name, ctx->runner_count);
+		return NULL;
+	}
+
+	return &ctx->runner[runner_id];
+}
+
+static size_t wahe_active_runner_id(wahe_module_t *ctx)
+{
+	// Reuse the runner currently executing a callback into this module
+	if (ctx && ctx->type == WAHE_MODULE_WASMTIME && wahe_cur_wasmtime_runner && wahe_cur_wasmtime_runner->module == ctx)
+		return wahe_cur_wasmtime_runner->runner_id;
+
+	// Use runner zero for ordinary and native calls
+	return 0;
+}
+
+static void fprint_wasmtime_error(wahe_module_t *ctx, wahe_wasmtime_runner_t *runner, wasmtime_error_t *error, wasm_trap_t *trap)
 {
 	wasm_byte_vec_t error_message;
 
@@ -84,12 +119,18 @@ void fprint_wasmtime_error(wahe_module_t *ctx, wasmtime_error_t *error, wasm_tra
 		wasm_trap_message(trap, &error_message);
 		wasm_trap_delete(trap);
 		fprintf_rl(stderr, "wasm_trap_message(): \"%.*s\"\n", (int) error_message.size, error_message.data);
-		fprintf_rl(stderr, "Module stack pointer %#zx\n", wahe_get_module_symbol_address(ctx, "__stack_pointer", 0));
+		if (runner && runner->stack_pointer.store_id)
+		{
+			// Report the stack pointer belonging to the runner that trapped
+			wasmtime_val_t stack_pointer;
+			wasmtime_global_get(runner->context, &runner->stack_pointer, &stack_pointer);
+			fprintf_rl(stderr, "Module runner %zu stack pointer %#zx\n", runner->runner_id, wasmtime_val_get_address(stack_pointer));
+		}
 		wasm_byte_vec_delete(&error_message);
 	}
 }
 
-wasmtime_val_t wasmtime_val_set_address(wahe_module_t *ctx, size_t address)
+static wasmtime_val_t wasmtime_val_set_address(wahe_module_t *ctx, size_t address)
 {
 	wasmtime_val_t val;
 
@@ -103,7 +144,7 @@ wasmtime_val_t wasmtime_val_set_address(wahe_module_t *ctx, size_t address)
 	return val;
 }
 
-size_t wasmtime_val_get_address(wasmtime_val_t val)
+static size_t wasmtime_val_get_address(wasmtime_val_t val)
 {
 	if (val.kind == WASMTIME_I32)
 		return val.of.i32;
@@ -144,10 +185,18 @@ static int wahe_init_module_memory(wahe_module_t *ctx)
 	}
 
 	#ifdef WAHE_WASMTIME
-	wasmtime_extern_t item;
+	// Use the store-independent shared memory handle when present
+	if (ctx->shared_memory)
+	{
+		ctx->memory_ptr = wasmtime_sharedmemory_data(ctx->shared_memory);
+		ctx->memory_size = wasmtime_sharedmemory_data_size(ctx->shared_memory);
+		return 1;
+	}
 
-	// Look for memory
-	if (!wasmtime_linker_get(ctx->linker, ctx->context, "", 0, "memory", strlen("memory"), &item))
+	// Look for the ordinary memory exported by runner zero
+	wahe_wasmtime_runner_t *runner = wahe_get_wasmtime_runner(ctx, 0, "initialise module memory");
+	wasmtime_extern_t item;
+	if (runner == NULL || !wasmtime_linker_get(runner->linker, runner->context, "", 0, "memory", strlen("memory"), &item))
 	{
 		fprintf_rl(stderr, "Error: memory not found in wasmtime_linker_get()\n");
 		return 0;
@@ -155,15 +204,24 @@ static int wahe_init_module_memory(wahe_module_t *ctx)
 
 	if (item.kind != WASMTIME_EXTERN_MEMORY)
 	{
+		// Accept an internally defined shared memory for a single runner
+		if (item.kind == WASMTIME_EXTERN_SHAREDMEMORY)
+		{
+			ctx->shared_memory = wasmtime_sharedmemory_clone(item.of.sharedmemory);
+			ctx->memory_ptr = wasmtime_sharedmemory_data(ctx->shared_memory);
+			ctx->memory_size = wasmtime_sharedmemory_data_size(ctx->shared_memory);
+			return 1;
+		}
+
 		fprintf_rl(stderr, "Error: memory found in wasmtime_linker_get() is not a memory\n");
 		return 0;
 	}
 
-	ctx->memory = item.of.memory;
+	runner->memory = item.of.memory;
 
 	// Store the fixed memory address and initial size
-	ctx->memory_ptr = wasmtime_memory_data(ctx->context, &ctx->memory);
-	ctx->memory_size = wasmtime_memory_data_size(ctx->context, &ctx->memory);
+	ctx->memory_ptr = wasmtime_memory_data(runner->context, &runner->memory);
+	ctx->memory_size = wasmtime_memory_data_size(runner->context, &runner->memory);
 
 	return 1;
 
@@ -181,19 +239,32 @@ static void wahe_refresh_module_memory_size(wahe_module_t *ctx)
 	if (ctx == NULL || ctx->type != WAHE_MODULE_WASMTIME)
 		return;
 
-	// Report and store changes without updating the fixed memory pointer
-	size_t current_size = wasmtime_memory_data_size(ctx->context, &ctx->memory);
+	// Read the active size from the module's shared or ordinary memory
+	size_t current_size;
+	if (ctx->shared_memory)
+		current_size = wasmtime_sharedmemory_data_size(ctx->shared_memory);
+	else
+	{
+		wahe_wasmtime_runner_t *runner = wahe_get_wasmtime_runner(ctx, 0, "refresh module memory size");
+		if (runner == NULL)
+			return;
+		current_size = wasmtime_memory_data_size(runner->context, &runner->memory);
+	}
+
+	// Serialize reporting and updating the common module size
+	rl_mutex_lock(&ctx->mutex);
 	if (current_size != ctx->memory_size)
 	{
 		fprintf_rl(stdout, "Memory of module #%d %s grew from %zu kB to %zu kB\n", ctx->module_id, ctx->module_name, ctx->memory_size >> 10, current_size >> 10);
 		ctx->memory_size = current_size;
 	}
+	rl_mutex_unlock(&ctx->mutex);
 	#else
 	(void) ctx;
 	#endif
 }
 
-size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_name, int verbosity)
+static size_t wahe_get_module_symbol_address_on_runner(wahe_module_t *ctx, size_t runner_id, const char *symbol_name, int verbosity)
 {
 	size_t addr = 0;
 
@@ -210,19 +281,31 @@ size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_nam
 	else if (ctx->type == WAHE_MODULE_WASMTIME)
 	{
 		#ifdef WAHE_WASMTIME
-		wasmtime_extern_t symb_ext;
+		// Select the store-specific instance that owns the global
+		wahe_wasmtime_runner_t *runner = wahe_get_wasmtime_runner(ctx, runner_id, "find a module symbol");
+		if (runner == NULL)
+			return 0;
 
-		if (wasmtime_linker_get(ctx->linker, ctx->context, "", 0, symbol_name, strlen(symbol_name), &symb_ext))
+		// Look up and read the exported global
+		wasmtime_extern_t symb_ext;
+		if (wasmtime_linker_get(runner->linker, runner->context, "", 0, symbol_name, strlen(symbol_name), &symb_ext))
 		{
+			if (symb_ext.kind != WASMTIME_EXTERN_GLOBAL)
+			{
+				fprintf_rl(stderr, "Error in module %s runner %zu: symbol %s is not a global\n", ctx->module_name, runner_id, symbol_name);
+				return 0;
+			}
+
+			// Convert the Wasm global value to a module address
 			wasmtime_val_t offset;
-			wasmtime_global_get(ctx->context, &symb_ext.of.global, &offset);
+			wasmtime_global_get(runner->context, &symb_ext.of.global, &offset);
 			addr = wasmtime_val_get_address(offset);
 
 			if (verbosity == 1)
-				fprintf_rl(stdout, "Module #%d %s: symbol %s found\n", ctx->module_id, ctx->module_name, symbol_name);
+				fprintf_rl(stdout, "Module #%d %s runner %zu: symbol %s found\n", ctx->module_id, ctx->module_name, runner_id, symbol_name);
 		}
 		else if (verbosity == -1)
-			fprintf_rl(stderr, "Error in module %s: symbol %s not found in wasmtime_linker_get()\n", ctx->module_name, symbol_name);
+			fprintf_rl(stderr, "Error in module %s runner %zu: symbol %s not found in wasmtime_linker_get()\n", ctx->module_name, runner_id, symbol_name);
 
 		#endif // WAHE_WASMTIME
 	}
@@ -233,6 +316,17 @@ size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_nam
 	}
 
 	return addr;
+}
+
+size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_name, int verbosity)
+{
+	// Resolve Wasmtime globals in the active runner and all other symbols normally
+	#ifdef WAHE_WASMTIME
+	size_t runner_id = wahe_active_runner_id(ctx);
+	#else
+	size_t runner_id = 0;
+	#endif
+	return wahe_get_module_symbol_address_on_runner(ctx, runner_id, symbol_name, verbosity);
 }
 
 void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_func_id func_id, int verbosity)
@@ -250,29 +344,34 @@ void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_f
 	else if (ctx->type == WAHE_MODULE_WASMTIME)
 	{
 		#ifdef WAHE_WASMTIME
-		wasmtime_extern_t func_ext;
-
-		// Get the symbol
-		if (!wasmtime_linker_get(ctx->linker, ctx->context, "", 0, func_name, strlen(func_name), &func_ext))
+		// Resolve the store-specific function handle in every runner
+		for (size_t runner_id = 0; runner_id < ctx->runner_count; runner_id++)
 		{
-			if (verbosity == -1)
-				fprintf_rl(stderr, "Error in module %s: function %s() not found in wasmtime_linker_get()\n", ctx->module_name, func_name);
-			return;
+			wahe_wasmtime_runner_t *runner = &ctx->runner[runner_id];
+			wasmtime_extern_t func_ext;
+
+			// Get the function export from this runner's instance
+			if (!wasmtime_linker_get(runner->linker, runner->context, "", 0, func_name, strlen(func_name), &func_ext))
+			{
+				if (verbosity == -1)
+					fprintf_rl(stderr, "Error in module %s runner %zu: function %s() not found in wasmtime_linker_get()\n", ctx->module_name, runner_id, func_name);
+				continue;
+			}
+
+			// Check the export kind before storing the function handle
+			if (func_ext.kind != WASMTIME_EXTERN_FUNC)
+			{
+				if (verbosity == -1)
+					fprintf_rl(stderr, "Error in module %s runner %zu: symbol %s is not a function\n", ctx->module_name, runner_id, func_name);
+				continue;
+			}
+
+			// Store the handle that belongs to this runner's store
+			runner->func[func_id] = func_ext.of.func;
+
+			if (verbosity == 1)
+				fprintf_rl(stdout, "Module #%d %s runner %zu: %s() found\n", ctx->module_id, ctx->module_name, runner_id, func_name);
 		}
-
-		// Check the symbol is a function
-		if (func_ext.kind != WASMTIME_EXTERN_FUNC)
-		{
-			if (verbosity == -1)
-				fprintf_rl(stderr, "Error in module %s: symbol %s found in wasmtime_linker_get() is not a function\n", ctx->module_name, func_name);
-			return;
-		}
-
-		// Store function symbol data
-		ctx->func[func_id] = func_ext.of.func;
-
-		if (verbosity == 1)
-			fprintf_rl(stdout, "Module #%d %s: %s() found\n", ctx->module_id, ctx->module_name, func_name);
 		#endif // WAHE_WASMTIME
 	}
 	else
@@ -339,7 +438,7 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	}
 }
 
-size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enum wahe_func_id func_id)
+static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_id, size_t *arg, int arg_count, enum wahe_func_id func_id)
 {
 	size_t ret_val;
 
@@ -370,6 +469,13 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	// Native call
 	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 	{
+		// Native modules currently expose one directly callable instance
+		if (runner_id != 0)
+		{
+			fprintf_rl(stderr, "Cannot call native module %s with runner %zu\n", ctx->module_name, runner_id);
+			return 0;
+		}
+
 		// Reject calls to functions the dynamic library did not export
 		if (ctx->dl_func[func_id] == NULL)
 		{
@@ -423,14 +529,20 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	}
 
 	#ifdef WAHE_WASMTIME
+	// Select the runner whose store and function handle will execute the call
+	wahe_wasmtime_runner_t *runner = wahe_get_wasmtime_runner(ctx, runner_id, "call a module function");
+	if (runner == NULL)
+		return 0;
+
 	wahe_chain_t *chain = wahe_cur_chain;
 	wasmtime_error_t *error;
 	wasm_trap_t *trap = NULL;
 	wasmtime_val_t ret[1], param[2];
 
-	if (ctx->func[func_id].store_id == 0)
+	// Reject functions not exported by this runner's instance
+	if (runner->func[func_id].store_id == 0)
 	{
-		fprintf_rl(stderr, "Cannot call %s:%s() because the Wasmtime function is not exported\n", ctx->module_name, wahe_func_name[func_id]);
+		fprintf_rl(stderr, "Cannot call %s runner %zu:%s() because the Wasmtime function is not exported\n", ctx->module_name, runner_id, wahe_func_name[func_id]);
 		return 0;
 	}
 
@@ -438,7 +550,7 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	for (int i=0; i < arg_count; i++)
 		param[i] = wasmtime_val_set_address(ctx, arg[i]);
 
-	// Call the function
+	// Record the function selected by the current execution chain
 	wahe_bench_point("calling function", 1);
 	int prev_func = WAHE_FUNC_NONE;
 	if (chain)
@@ -446,9 +558,16 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 		prev_func = chain->current_func;
 		chain->current_func = func_id;
 	}
-	rl_mutex_lock(&ctx->mutex);
-	error = wasmtime_func_call(ctx->context, &ctx->func[func_id], param, arg_count, ret, func_id != WAHE_FUNC_FREE, &trap);
-	rl_mutex_unlock(&ctx->mutex);
+
+	// Enter only this runner while allowing other runners to execute in parallel
+	wahe_wasmtime_runner_t *prev_runner = wahe_cur_wasmtime_runner;
+	rl_mutex_lock(&runner->mutex);
+	wahe_cur_wasmtime_runner = runner;
+	error = wasmtime_func_call(runner->context, &runner->func[func_id], param, arg_count, ret, func_id != WAHE_FUNC_FREE, &trap);
+	wahe_cur_wasmtime_runner = prev_runner;
+	rl_mutex_unlock(&runner->mutex);
+
+	// Restore chain diagnostics after the call returns
 	if (chain)
 		chain->current_func = prev_func;
 	wahe_bench_point("function returned", -1);
@@ -458,8 +577,8 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 
 	if (error || trap)
 	{
-		fprintf_rl(stderr, "Calling %s:%s() failed\n", ctx->module_name, wahe_func_name[func_id]);
-		fprint_wasmtime_error(ctx, error, trap);
+		fprintf_rl(stderr, "Calling %s runner %zu:%s() failed\n", ctx->module_name, runner_id, wahe_func_name[func_id]);
+		fprint_wasmtime_error(ctx, runner, error, trap);
 		ctx->valid = 0;
 		return 0;
 	}
@@ -468,7 +587,7 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	if (func_id != WAHE_FUNC_FREE)
 		if (ret[0].kind != ctx->address_type)
 		{
-			fprintf_rl(stderr, "call_module_func_core() expected a type %s result from %s:%s()\n", ctx->address_type==WASMTIME_I32 ? "int32_t" : "int64_t", ctx->module_name, wahe_func_name[func_id]);
+			fprintf_rl(stderr, "call_module_func_core_on_runner() expected a type %s result from %s runner %zu:%s()\n", ctx->address_type==WASMTIME_I32 ? "int32_t" : "int64_t", ctx->module_name, runner_id, wahe_func_name[func_id]);
 			return 0;
 		}
 
@@ -481,37 +600,38 @@ size_t call_module_func_core(wahe_module_t *ctx, size_t *arg, int arg_count, enu
 	#endif // WAHE_WASMTIME
 }
 
-size_t call_module_malloc(wahe_module_t *ctx, size_t size)
+size_t call_module_malloc_on_runner(wahe_module_t *ctx, size_t runner_id, size_t size)
 {
 	// Report allocation failure with its module and requested size
-	size_t address = call_module_func_core(ctx, &size, 1, WAHE_FUNC_MALLOC);
+	size_t address = call_module_func_core_on_runner(ctx, runner_id, &size, 1, WAHE_FUNC_MALLOC);
 	if (address == 0)
-		fprintf_rl(stderr, "module_malloc() in module %s failed to allocate %zu bytes\n", ctx ? ctx->module_name : "(?)", size);
+		fprintf_rl(stderr, "module_malloc() in module %s runner %zu failed to allocate %zu bytes\n", ctx ? ctx->module_name : "(?)", runner_id, size);
 	return address;
 }
 
-size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
+size_t call_module_realloc_on_runner(wahe_module_t *ctx, size_t runner_id, size_t address, size_t size)
 {
 	size_t ret, arg[2];
 
 	// Call realloc
 	arg[0] = address;
 	arg[1] = size;
-	ret = call_module_func_core(ctx, arg, 2, WAHE_FUNC_REALLOC);
+	ret = call_module_func_core_on_runner(ctx, runner_id, arg, 2, WAHE_FUNC_REALLOC);
 
 	// Check NULL result
 	if (ret == 0)
-		fprintf_rl(stderr, "call_module_realloc(%s, %#zx, %zu) returned NULL\n", ctx->module_name, address, size);
+		fprintf_rl(stderr, "call_module_realloc_on_runner(%s, %zu, %#zx, %zu) returned NULL\n", ctx->module_name, runner_id, address, size);
 
 	return ret;
 }
 
-void call_module_free(wahe_module_t *ctx, size_t address)
+void call_module_free_on_runner(wahe_module_t *ctx, size_t runner_id, size_t address)
 {
-	call_module_func_core(ctx, &address, 1, WAHE_FUNC_FREE);
+	// Call the deallocator through the selected runner
+	call_module_func_core_on_runner(ctx, runner_id, &address, 1, WAHE_FUNC_FREE);
 }
 
-char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_id func_id, int call_from_eo)
+char *call_module_func_on_runner(wahe_module_t *ctx, size_t runner_id, size_t message_addr, enum wahe_func_id func_id, int call_from_eo)
 {
 	size_t ret_msg_addr_s = 0, *ret_msg_addr = &ret_msg_addr_s;
 
@@ -523,7 +643,7 @@ char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_i
 	}
 
 	// Call function and store the return message address
-	*ret_msg_addr = (size_t) call_module_func_core(ctx, &message_addr, 1, func_id);
+	*ret_msg_addr = (size_t) call_module_func_core_on_runner(ctx, runner_id, &message_addr, 1, func_id);
 
 	// Return pointer to return message
 	if (ctx->type == WAHE_MODULE_NATIVE)
@@ -531,6 +651,50 @@ char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_i
 	if (*ret_msg_addr)
 		return (char *) &ctx->memory_ptr[*ret_msg_addr];
 	return NULL;
+}
+
+size_t call_module_malloc(wahe_module_t *ctx, size_t size)
+{
+	// Use the active callback runner or runner zero
+	#ifdef WAHE_WASMTIME
+	size_t runner_id = wahe_active_runner_id(ctx);
+	#else
+	size_t runner_id = 0;
+	#endif
+	return call_module_malloc_on_runner(ctx, runner_id, size);
+}
+
+size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
+{
+	// Use the active callback runner or runner zero
+	#ifdef WAHE_WASMTIME
+	size_t runner_id = wahe_active_runner_id(ctx);
+	#else
+	size_t runner_id = 0;
+	#endif
+	return call_module_realloc_on_runner(ctx, runner_id, address, size);
+}
+
+void call_module_free(wahe_module_t *ctx, size_t address)
+{
+	// Use the active callback runner or runner zero
+	#ifdef WAHE_WASMTIME
+	size_t runner_id = wahe_active_runner_id(ctx);
+	#else
+	size_t runner_id = 0;
+	#endif
+	call_module_free_on_runner(ctx, runner_id, address);
+}
+
+char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_id func_id, int call_from_eo)
+{
+	// Use the active callback runner or runner zero
+	#ifdef WAHE_WASMTIME
+	size_t runner_id = wahe_active_runner_id(ctx);
+	#else
+	size_t runner_id = 0;
+	#endif
+	return call_module_func_on_runner(ctx, runner_id, message_addr, func_id, call_from_eo);
 }
 
 #ifdef H_ROUZICLIB
@@ -603,21 +767,42 @@ int wahe_message_to_raster(wahe_module_t *ctx, size_t msg_addr, raster_t *r)
 }
 #endif
 
-size_t module_vsprintf_alloc(wahe_module_t *ctx, const char *format, va_list args)
+static size_t module_vsprintf_alloc_on_runner(wahe_module_t *ctx, size_t runner_id, const char *format, va_list args)
 {
 	int len;
 
 	// Get length of string to print
 	len = vstrlenf(format, args);
 
-	// Alloc message in the module's linear memory
-	size_t addr = call_module_malloc(ctx, len+1);
+	// Allocate the message through the selected runner
+	size_t addr = call_module_malloc_on_runner(ctx, runner_id, len+1);
 
 	// Print
 	if (addr)
 		vsnprintf(&ctx->memory_ptr[addr], len+1, format, args);
 
 	return addr;
+}
+
+static size_t module_sprintf_alloc_on_runner(wahe_module_t *ctx, size_t runner_id, const char *format, ...)
+{
+	// Format a message allocated through the selected runner
+	va_list args;
+	va_start(args, format);
+	size_t addr = module_vsprintf_alloc_on_runner(ctx, runner_id, format, args);
+	va_end(args);
+	return addr;
+}
+
+size_t module_vsprintf_alloc(wahe_module_t *ctx, const char *format, va_list args)
+{
+	// Select the active callback runner or runner zero
+	#ifdef WAHE_WASMTIME
+	size_t runner_id = wahe_active_runner_id(ctx);
+	#else
+	size_t runner_id = 0;
+	#endif
+	return module_vsprintf_alloc_on_runner(ctx, runner_id, format, args);
 }
 
 size_t module_sprintf_alloc(wahe_module_t *ctx, const char *format, ...)
@@ -684,7 +869,156 @@ void wahe_register_commands(wahe_module_t *ctx, char *list)
 	free_2d(array, 1);
 }
 
-void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path)
+#ifdef WAHE_WASMTIME
+static int wahe_set_wasmtime_runner_stack(wahe_module_t *ctx, wahe_wasmtime_runner_t *runner)
+{
+	// Find the private stack-pointer global in this runner's instance
+	wasmtime_extern_t stack_export;
+	if (!wasmtime_linker_get(runner->linker, runner->context, "", 0, "__stack_pointer", sizeof("__stack_pointer")-1, &stack_export) ||
+		stack_export.kind != WASMTIME_EXTERN_GLOBAL)
+	{
+		// Keep legacy single-runner modules that do not export their stack pointer
+		if (ctx->runner_count == 1)
+			return 1;
+
+		fprintf_rl(stderr, "Module %s runner %zu does not export a mutable __stack_pointer global\n", ctx->module_name, runner->runner_id);
+		return 0;
+	}
+	runner->stack_pointer = stack_export.of.global;
+
+	// Read the linked stack top from this instance before assigning its slice
+	wasmtime_val_t linked_stack_pointer;
+	wasmtime_global_get(runner->context, &runner->stack_pointer, &linked_stack_pointer);
+	size_t linked_stack_top = wasmtime_val_get_address(linked_stack_pointer);
+	if (runner->runner_id == 0)
+		ctx->stack_base = linked_stack_top;
+	else if (linked_stack_top != ctx->stack_base)
+	{
+		fprintf_rl(stderr, "Module %s runner %zu has stack top %#zx instead of runner zero's %#zx\n", ctx->module_name, runner->runner_id, linked_stack_top, ctx->stack_base);
+		return 0;
+	}
+
+	// Preserve the linked stack pointer for a single runner
+	if (ctx->runner_count == 1)
+		return 1;
+
+	// Require stack-first layout so slicing does not overlap module data
+	size_t data_end = wahe_get_module_symbol_address_on_runner(ctx, runner->runner_id, "__data_end", 0);
+	if (data_end < ctx->stack_base)
+	{
+		fprintf_rl(stderr, "Module %s must export __data_end and be linked with --stack-first before its stack can be split between runners\n", ctx->module_name);
+		return 0;
+	}
+
+	// Validate that the linker-reserved stack can be split equally and aligned
+	if (ctx->stack_base == 0 || ctx->stack_base % ctx->runner_count != 0)
+	{
+		fprintf_rl(stderr, "Module %s stack region %#zx cannot be split between %zu runners\n", ctx->module_name, ctx->stack_base, ctx->runner_count);
+		return 0;
+	}
+	size_t stack_size = ctx->stack_base / ctx->runner_count;
+	if (stack_size < 16 || stack_size % 16 != 0)
+	{
+		fprintf_rl(stderr, "Module %s runner stack size %#zx is not a positive multiple of 16 bytes\n", ctx->module_name, stack_size);
+		return 0;
+	}
+
+	// Assign this runner the top of its zero-indexed stack slice
+	size_t stack_top = stack_size * (runner->runner_id + 1);
+	wasmtime_val_t value = wasmtime_val_set_address(ctx, stack_top);
+	wasmtime_error_t *error = wasmtime_global_set(runner->context, &runner->stack_pointer, &value);
+	if (error)
+	{
+		fprintf_rl(stderr, "Error setting stack pointer %#zx for module %s runner %zu\n", stack_top, ctx->module_name, runner->runner_id);
+		fprint_wasmtime_error(ctx, runner, error, NULL);
+		return 0;
+	}
+
+	fprintf_rl(stdout, "Module #%d %s runner %zu stack range %#zx - %#zx\n", ctx->module_id, ctx->module_name, runner->runner_id, stack_top-stack_size, stack_top);
+	return 1;
+}
+
+static int wahe_init_wasmtime_runner(wahe_module_t *ctx, size_t runner_id)
+{
+	// Initialize the runner identity and its recursive store lock
+	wahe_wasmtime_runner_t *runner = &ctx->runner[runner_id];
+	runner->module = ctx;
+	runner->runner_id = runner_id;
+	rl_mutex_init(&runner->mutex);
+
+	// Create a separate store so this runner can execute concurrently
+	runner->store = wasmtime_store_new(ctx->engine, runner, NULL);
+	if (runner->store == NULL)
+	{
+		fprintf_rl(stderr, "Error creating Wasmtime store for module %s runner %zu\n", ctx->module_name, runner_id);
+		return 0;
+	}
+	runner->context = wasmtime_store_context(runner->store);
+
+	// Create this runner's linker and install the WASI imports
+	runner->linker = wasmtime_linker_new(ctx->engine);
+	wasmtime_error_t *error = wasmtime_linker_define_wasi(runner->linker);
+	if (error)
+	{
+		fprintf_rl(stderr, "Error linking WASI for module %s runner %zu\n", ctx->module_name, runner_id);
+		fprint_wasmtime_error(ctx, runner, error, NULL);
+		return 0;
+	}
+
+	// Give every store an independent WASI configuration
+	wasi_config_t *wasi_config = wasi_config_new();
+	wasi_config_inherit_stdout(wasi_config);
+	wasi_config_inherit_stderr(wasi_config);
+	error = wasmtime_context_set_wasi(runner->context, wasi_config);
+	if (error)
+	{
+		fprintf_rl(stderr, "Error initialising WASI for module %s runner %zu\n", ctx->module_name, runner_id);
+		fprint_wasmtime_error(ctx, runner, error, NULL);
+		return 0;
+	}
+
+	// Define the host command callback with the module as its stable identity
+	wasm_valtype_t *address_type = ctx->address_type == WASMTIME_I32 ? wasm_valtype_new_i32() : wasm_valtype_new_i64();
+	wasm_functype_t *func_type = wasm_functype_new_1_1(address_type, ctx->address_type == WASMTIME_I32 ? wasm_valtype_new_i32() : wasm_valtype_new_i64());
+	error = wasmtime_linker_define_func(runner->linker, "env", strlen("env"), "wahe_run_command", strlen("wahe_run_command"), func_type, wahe_run_command, ctx, NULL);
+	wasm_functype_delete(func_type);
+	if (error)
+	{
+		fprintf_rl(stderr, "Error defining callback for module %s runner %zu\n", ctx->module_name, runner_id);
+		fprint_wasmtime_error(ctx, runner, error, NULL);
+		return 0;
+	}
+
+	// Import the same shared memory handle into every runner
+	if (ctx->shared_memory)
+	{
+		wasmtime_extern_t memory_import = {0};
+		memory_import.kind = WASMTIME_EXTERN_SHAREDMEMORY;
+		memory_import.of.sharedmemory = ctx->shared_memory;
+		error = wasmtime_linker_define(runner->linker, runner->context, "env", sizeof("env")-1, "memory", sizeof("memory")-1, &memory_import);
+		if (error)
+		{
+			fprintf_rl(stderr, "Error defining shared memory for module %s runner %zu\n", ctx->module_name, runner_id);
+			fprint_wasmtime_error(ctx, runner, error, NULL);
+			return 0;
+		}
+	}
+
+	// Instantiate the compiled module in this runner's store
+	error = wasmtime_linker_module(runner->linker, runner->context, "", 0, ctx->module);
+	if (error)
+	{
+		fprintf_rl(stderr, "Error instantiating module %s runner %zu\n", ctx->module_name, runner_id);
+		fprint_wasmtime_error(ctx, runner, error, NULL);
+		return 0;
+	}
+
+	// Give the instance its non-overlapping shadow-stack slice
+	return wahe_set_wasmtime_runner_stack(ctx, runner);
+}
+#endif
+
+void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count)
 {
 	memset(ctx, 0, sizeof(wahe_module_t));
 	rl_mutex_init(&ctx->mutex);
@@ -695,6 +1029,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	// Store module index so we can know which index a given module has
 	ctx->parent_group = parent_group;
 	ctx->module_id = module_index;
+	ctx->runner_count = runner_count ? runner_count : 1;
 
 	// WASM module
 	if (check_if_file_is_wasm(path))
@@ -712,78 +1047,100 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		}
 
 		// Parse sections of the WASM binary
+		wasmbin_memory_info_t memory_info;
 		io_override_set_buffer();
 		ctx->stack_base = wasmbin_read_stack_pointer((FILE *) &wasm_buf);
-		wasmbin_read_memory_size((FILE *) &wasm_buf, &ctx->page_count_initial, &ctx->page_count_max);
+		int memory_found = wasmbin_read_memory_info((FILE *) &wasm_buf, &memory_info);
 		io_override_set_FILE();
+		if (!memory_found)
+		{
+			fprintf_rl(stderr, "Module %s does not declare or import a linear memory\n", ctx->module_name);
+			free_buf(&wasm_buf);
+			return;
+		}
+		ctx->page_count_initial = memory_info.base_pages;
+		ctx->page_count_max = memory_info.max_pages;
+		ctx->memory_is_shared = memory_info.shared;
+		ctx->memory_bits = memory_info.memory64 ? 64 : 32;
+		ctx->address_type = memory_info.memory64 ? WASMTIME_I64 : WASMTIME_I32;
 
-		wasmtime_error_t *error;
-		wasm_functype_t *func_type;
+		// Require an imported shared memory when multiple instances must share it
+		if (ctx->runner_count > 1 && (!memory_info.imported || !memory_info.shared || !memory_info.maximum_present))
+		{
+			fprintf_rl(stderr, "Module %s requests %zu runners but its memory is not an imported shared memory with a maximum\n", ctx->module_name, ctx->runner_count);
+			free_buf(&wasm_buf);
+			return;
+		}
 
-		// WASM initialisation
+		// Reject unsupported imported ordinary memories explicitly
+		if (memory_info.imported && !memory_info.shared)
+		{
+			fprintf_rl(stderr, "Module %s imports an ordinary memory, which WAHE does not provide\n", ctx->module_name);
+			free_buf(&wasm_buf);
+			return;
+		}
+
+		// Configure the engine for the Wasm threads proposal when needed
 		wasm_config_t *config = wasm_config_new();
 		//wasmtime_config_debug_info_set(config, true);
-		ctx->engine = wasm_engine_new_with_config(config);
-		ctx->store = wasmtime_store_new(ctx->engine, NULL, NULL);
-		ctx->context = wasmtime_store_context(ctx->store);
-
-		// Create a linker with WASI functions defined
-		ctx->linker = wasmtime_linker_new(ctx->engine);
-		error = wasmtime_linker_define_wasi(ctx->linker);
-		if (error)
+		#ifdef WASMTIME_FEATURE_THREADS
+		if (memory_info.shared)
+			wasmtime_config_wasm_threads_set(config, true);
+		#else
+		if (memory_info.shared)
 		{
-			fprintf_rl(stderr, "Error linking WASI in wasmtime_linker_define_wasi()\n");
-			fprint_wasmtime_error(ctx, error, NULL);
+			fprintf_rl(stderr, "Module %s requires Wasmtime thread support that is absent from this build\n", ctx->module_name);
+			wasm_config_delete(config);
+			free_buf(&wasm_buf);
+			return;
+		}
+		#endif
+		ctx->engine = wasm_engine_new_with_config(config);
+		if (ctx->engine == NULL)
+		{
+			fprintf_rl(stderr, "Error creating Wasmtime engine for module %s\n", ctx->module_name);
+			free_buf(&wasm_buf);
 			return;
 		}
 
 		// Compile WASM
-		error = wasmtime_module_new(ctx->engine, wasm_buf.buf, wasm_buf.len, &ctx->module);
+		wasmtime_error_t *error = wasmtime_module_new(ctx->engine, wasm_buf.buf, wasm_buf.len, &ctx->module);
 		if (error)
 		{
 			fprintf_rl(stderr, "Error compiling the module in wasmtime_module_new()\n");
-			fprint_wasmtime_error(ctx, error, NULL);
+			fprint_wasmtime_error(ctx, NULL, error, NULL);
+			free_buf(&wasm_buf);
 			return;
 		}
 
 		free_buf(&wasm_buf);
 
-		// WASI initialisation
-		ctx->wasi_config = wasi_config_new();
-		wasi_config_inherit_stdout(ctx->wasi_config);
-		wasi_config_inherit_stderr(ctx->wasi_config);
-		error = wasmtime_context_set_wasi(ctx->context, ctx->wasi_config);
-		if (error)
+		// Create the store-independent shared memory imported by every runner
+		if (memory_info.shared)
 		{
-			fprintf_rl(stderr, "Error initialising WASI in wasmtime_context_set_wasi()\n");
-			fprint_wasmtime_error(ctx, error, NULL);
-			return;
+			wasm_memorytype_t *memory_type = wasmtime_memorytype_new(memory_info.base_pages, memory_info.maximum_present, memory_info.max_pages, memory_info.memory64, true);
+			error = wasmtime_sharedmemory_new(ctx->engine, memory_type, &ctx->shared_memory);
+			wasm_memorytype_delete(memory_type);
+			if (error)
+			{
+				fprintf_rl(stderr, "Error creating shared memory for module %s\n", ctx->module_name);
+				fprint_wasmtime_error(ctx, NULL, error, NULL);
+				return;
+			}
 		}
 
-		// Initialise callbacks (host functions called from WASM module)
-		func_type = wasm_functype_new_1_1(wasm_valtype_new_i32(), wasm_valtype_new_i32());
-
-		// Pass the calling module context directly to the host callback
-		error = wasmtime_linker_define_func(ctx->linker, "env", strlen("env"), "wahe_run_command", strlen("wahe_run_command"), func_type, wahe_run_command, ctx, NULL);
-		if (error)
+		// Allocate and initialize all zero-indexed runners before executing the module
+		ctx->runner = calloc(ctx->runner_count, sizeof(*ctx->runner));
+		if (ctx->runner == NULL)
 		{
-			fprintf_rl(stderr, "Error defining callback in wasmtime_linker_define_func()\n");
-			wasm_functype_delete(func_type);
-			fprint_wasmtime_error(ctx, error, NULL);
+			fprintf_rl(stderr, "Error allocating %zu Wasmtime runners for module %s\n", ctx->runner_count, ctx->module_name);
 			return;
 		}
-		wasm_functype_delete(func_type);
+		for (size_t runner_id = 0; runner_id < ctx->runner_count; runner_id++)
+			if (!wahe_init_wasmtime_runner(ctx, runner_id))
+				return;
 
-		// Instantiate the module
-		error = wasmtime_linker_module(ctx->linker, ctx->context, "", 0, ctx->module);
-		if (error)
-		{
-			fprintf_rl(stderr, "Error instantiating module %s in wasmtime_linker_module()\n", ctx->module_name);
-			fprint_wasmtime_error(ctx, error, NULL);
-			return;
-		}
-
-		// Find functions from the WASM module
+		// Find every instance's store-specific function handles
 		wahe_init_all_module_symbols(ctx);
 		ctx->valid = 1;
 
@@ -794,12 +1151,9 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 			return;
 		}
 
-		// Set the type of module addresses (currently always 32-bit)
-		ctx->address_type = WASMTIME_I32;
-
 		// Print details
-		fprintf_rl(stdout, "Stack base %#zx, heap base %#zx, data end %#zx\n", ctx->stack_base, ctx->heap_base, ctx->data_end);
-		fprintf_rl(stdout, "Initial memory %" PRIu64 " kB, max memory %" PRIu64 " kB\n", (uint64_t) (ctx->page_count_initial*64ULL), (uint64_t) (ctx->page_count_max*64ULL));
+		fprintf_rl(stdout, "%zu runners, total stack region %#zx, heap base %#zx, data end %#zx\n", ctx->runner_count, ctx->stack_base, ctx->heap_base, ctx->data_end);
+		fprintf_rl(stdout, "Initial memory %" PRIu64 " kB, max memory %" PRIu64 " kB%s\n", (uint64_t) (ctx->page_count_initial*64ULL), (uint64_t) (ctx->page_count_max*64ULL), ctx->memory_is_shared ? ", shared" : "");
 
 		#else
 		ctx->valid = 0;
@@ -810,6 +1164,13 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	// Native module
 	else if ((ctx->native = dynlib_open(path)))
 	{
+		// Reject multiple runners for module types without separate Wasmtime stores
+		if (ctx->runner_count != 1)
+		{
+			fprintf_rl(stderr, "Native module %s cannot be initialized with %zu runners\n", ctx->module_name, ctx->runner_count);
+			return;
+		}
+
 		// Use the native ABI while discovering the dynamic library type
 		ctx->type = WAHE_MODULE_NATIVE;
 		ctx->valid = 1;
@@ -903,7 +1264,7 @@ void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size
 	memcpy(dst_module ? &dst_module->memory_ptr[dst_addr] : (void *) dst_addr, src_module ? &src_module->memory_ptr[src_addr] : (void *) src_addr, copy_size);
 }
 
-size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module)
+size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module, size_t dst_runner_id)
 {
 	// Reject invalid module-to-module message transfers
 	if (src_module == NULL || dst_module == NULL || src_message == NULL || src_module->valid == 0 || dst_module->valid == 0)
@@ -915,8 +1276,19 @@ size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *
 		return 0;
 	}
 
-	// Prefix the message with the source module's actual host memory address
-	return module_sprintf_alloc(dst_module, "From memory %#zx\n%s", (size_t) src_module->memory_ptr, src_message);
+	// Prefix the message in memory allocated through the selected destination runner
+	return module_sprintf_alloc_on_runner(dst_module, dst_runner_id, "From memory %#zx\n%s", (size_t) src_module->memory_ptr, src_message);
+}
+
+size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module)
+{
+	// Select the active destination runner or runner zero
+	#ifdef WAHE_WASMTIME
+	size_t runner_id = wahe_active_runner_id(dst_module);
+	#else
+	size_t runner_id = 0;
+	#endif
+	return wahe_copy_message_between_modules_on_runner(src_module, src_message, dst_module, runner_id);
 }
 
 size_t wahe_load_raw_file(wahe_module_t *ctx, const char *path, size_t *size)
@@ -1068,13 +1440,15 @@ void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int d
 		bufprintf(&buf, "Mouse scroll %s %d\n", mouse.b.wheel < 0 ? "down" : "up", abs(mouse.b.wheel));
 
 	// Copy message from host memory to module memory
-	size_t *addr = &chain->exec_order[ chain->connection[conn_id].dst_eo ].dst_msg_addr;
-	call_module_free(&group->module[module_id], *addr);
+	wahe_exec_order_t *dst_eo = &chain->exec_order[chain->connection[conn_id].dst_eo];
+	size_t *addr = &dst_eo->dst_msg_addr;
+	call_module_free_on_runner(&group->module[module_id], dst_eo->runner_id, *addr);
 	*addr = 0;
 
 	if (buf.buf)
 	{
-		*addr = call_module_malloc(&group->module[module_id], buf.len + 1);
+		// Allocate the input through the runner that will consume it
+		*addr = call_module_malloc_on_runner(&group->module[module_id], dst_eo->runner_id, buf.len + 1);
 		if (*addr)
 			memcpy(&group->module[module_id].memory_ptr[*addr], buf.buf, buf.len + 1);
 		free_buf(&buf);
@@ -1227,11 +1601,24 @@ wasm_trap_t *wahe_run_command(void *env, wasmtime_caller_t *caller, const wasmti
 	size_t return_msg_addr = 0;
 
 	// Reject malformed callback invocations
-	if (ctx == NULL || arg == NULL || result == NULL || arg_count < 1 || result_count < 1)
+	if (ctx == NULL || caller == NULL || arg == NULL || result == NULL || arg_count < 1 || result_count < 1)
 	{
 		fprintf_rl(stderr, "Malformed Wasmtime wahe_run_command() callback with module %p, %zu arguments and %zu results\n", (void *) ctx, arg_count, result_count);
 		return NULL;
 	}
+
+	// Recover the runner identity stored in the calling Wasmtime store
+	wasmtime_context_t *caller_context = wasmtime_caller_context(caller);
+	wahe_wasmtime_runner_t *runner = wasmtime_context_get_data(caller_context);
+	if (runner == NULL || runner->module != ctx)
+	{
+		fprintf_rl(stderr, "Wasmtime callback for module %s has an invalid runner context\n", ctx->module_name);
+		return NULL;
+	}
+
+	// Make callback-triggered allocations and nested calls use this runner
+	wahe_wasmtime_runner_t *prev_runner = wahe_cur_wasmtime_runner;
+	wahe_cur_wasmtime_runner = runner;
 
 	// Synchronize memory growth before processing commands from the module
 	wahe_refresh_module_memory_size(ctx);
@@ -1247,6 +1634,9 @@ wasm_trap_t *wahe_run_command(void *env, wasmtime_caller_t *caller, const wasmti
 		// Run the command
 		return_msg_addr = wahe_run_command_core(ctx, message);
 	}
+
+	// Restore the previous runner before returning to Wasmtime
+	wahe_cur_wasmtime_runner = prev_runner;
 
 	// Return message
 	result[0] = wasmtime_val_set_address(ctx, return_msg_addr);
