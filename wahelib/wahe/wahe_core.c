@@ -1004,13 +1004,38 @@ static int wahe_init_wasmtime_runner(wahe_module_t *ctx, size_t runner_id)
 		}
 	}
 
-	// Instantiate the compiled module in this runner's store
-	error = wasmtime_linker_module(runner->linker, runner->context, "", 0, ctx->module);
-	if (error)
+	// Let runner zero perform the reactor initialization exactly once
+	if (runner_id == 0)
 	{
-		fprintf_rl(stderr, "Error instantiating module %s runner %zu\n", ctx->module_name, runner_id);
-		fprint_wasmtime_error(ctx, runner, error, NULL);
-		return 0;
+		error = wasmtime_linker_module(runner->linker, runner->context, "", 0, ctx->module);
+		if (error)
+		{
+			fprintf_rl(stderr, "Error instantiating module %s runner %zu\n", ctx->module_name, runner_id);
+			fprint_wasmtime_error(ctx, runner, error, NULL);
+			return 0;
+		}
+	}
+	else
+	{
+		// Instantiate later runners without repeating the shared reactor initialization
+		wasmtime_instance_t instance;
+		wasm_trap_t *trap = NULL;
+		error = wasmtime_linker_instantiate(runner->linker, runner->context, ctx->module, &instance, &trap);
+		if (error || trap)
+		{
+			fprintf_rl(stderr, "Error instantiating module %s runner %zu\n", ctx->module_name, runner_id);
+			fprint_wasmtime_error(ctx, runner, error, trap);
+			return 0;
+		}
+
+		// Expose this instance's exports through the same linker lookup path
+		error = wasmtime_linker_define_instance(runner->linker, runner->context, "", 0, &instance);
+		if (error)
+		{
+			fprintf_rl(stderr, "Error defining exports for module %s runner %zu\n", ctx->module_name, runner_id);
+			fprint_wasmtime_error(ctx, runner, error, NULL);
+			return 0;
+		}
 	}
 
 	// Give the instance its non-overlapping shadow-stack slice
@@ -1192,9 +1217,9 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		return;
 	}
 
-	// Send pointer to wahe_run_command() if the module is not WASM
+	// Send the host callback and module context if the module is not WASM
 	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
-		wahe_send_input(ctx, "wahe_run_command_with_id() = %#zx", wahe_run_command_with_id_native);
+		wahe_send_input(ctx, "module_ctx = %#zx\nwahe_run_command_with_id() = %#zx", (size_t) ctx, (size_t) wahe_run_command_with_id_native);
 
 	// Register commands
 	char *cmd_reg_msg = wahe_send_input(ctx, "Command registration");
@@ -1277,7 +1302,10 @@ size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, co
 	}
 
 	// Prefix the message in memory allocated through the selected destination runner
-	return module_sprintf_alloc_on_runner(dst_module, dst_runner_id, "From memory %#zx\n%s", (size_t) src_module->memory_ptr, src_message);
+	if (src_module->memory_ptr)
+		return module_sprintf_alloc_on_runner(dst_module, dst_runner_id, "From memory %#zx\n%s", (size_t) src_module->memory_ptr, src_message);
+	else
+		return module_sprintf_alloc_on_runner(dst_module, dst_runner_id, "%s", src_message);
 }
 
 size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module)

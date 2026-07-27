@@ -43,6 +43,41 @@ void wahe_symbol_table_free(wahe_symbol_table_t *table)
 	memset(table, 0, sizeof(wahe_symbol_table_t));
 }
 
+#define WAHE_MODULE_RESERVE_COUNT ((size_t) 4096)
+
+static int wahe_alloc_stable_module_slots(wahe_group_t *group, size_t needed_count)
+{
+	// Reject module counts outside the fixed address reservation
+	if (needed_count > WAHE_MODULE_RESERVE_COUNT)
+	{
+		fprintf_rl(stderr, "Cannot allocate %zu modules beyond the %zu-module reservation\n", needed_count, WAHE_MODULE_RESERVE_COUNT);
+		return 0;
+	}
+
+	// Keep spare committed slots while staying inside the reservation
+	size_t new_alloc_count = needed_count + needed_count / 2 + 1;
+	new_alloc_count = MINN(new_alloc_count, WAHE_MODULE_RESERVE_COUNT);
+
+	// Reserve the module array once so initialized module addresses never move
+	if (group->module == NULL)
+	{
+		group->module = wahe_virtual_memory_alloc(new_alloc_count * sizeof(*group->module), WAHE_MODULE_RESERVE_COUNT * sizeof(*group->module));
+		if (group->module == NULL)
+			return 0;
+		group->module_as = new_alloc_count;
+		return 1;
+	}
+
+	// Commit a larger prefix without changing the reserved base address
+	if (needed_count > group->module_as)
+	{
+		if (!wahe_virtual_memory_commit(group->module, new_alloc_count * sizeof(*group->module)))
+			return 0;
+		group->module_as = new_alloc_count;
+	}
+	return 1;
+}
+
 void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 {
 	// group has to be a pointer with a fixed location so that pointers to it in the struct wouldn't be dereferenced
@@ -129,7 +164,14 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 
 			is = wahe_add_symbol_to_table(&symb_module, module_name);
 
-			alloc_enough(&group->module, group->module_count = is+1, &group->module_as, sizeof(wahe_module_t), 1.5);
+			// Grow the module array without invalidating initialized module addresses
+			if (!wahe_alloc_stable_module_slots(group, is + 1))
+			{
+				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Cannot allocate storage for module \"%s\".\n", filepath, il, module_name);
+				free(module_path);
+				goto end;
+			}
+			group->module_count = is + 1;
 
 			// Load module
 			if (check_file_is_readable(module_path))

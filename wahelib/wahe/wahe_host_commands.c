@@ -125,7 +125,10 @@ static enum wahe_host_cmd_result wahe_hcmd_run_chain(wahe_module_t *ctx, const c
 		char *prefixed_input_msg = NULL;
 		if (input_start)
 		{
-			prefixed_input_msg = sprintf_alloc("From memory %#zx\n%s", (size_t) ctx->memory_ptr, &(*line)[input_start]);
+			if (ctx->memory_ptr)
+				prefixed_input_msg = sprintf_alloc("From memory %#zx\n%s", (size_t) ctx->memory_ptr, &(*line)[input_start]);
+			else
+				prefixed_input_msg = sprintf_alloc("%s", &(*line)[input_start]);
 			input_msg = prefixed_input_msg;
 		}
 
