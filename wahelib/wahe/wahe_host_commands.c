@@ -154,7 +154,7 @@ static enum wahe_host_cmd_result wahe_hcmd_run_chain(wahe_module_t *ctx, const c
 	else
 	{
 		// Report requests for chains that do not exist
-		fprintf_rl(stderr, "Module %s attempted to run unknown chain '%s'\n", ctx->module_name, name);
+		//fprintf_rl(stderr, "Module %s attempted to run unknown chain '%s'\n", ctx->module_name, name);
 	}
 
 	// Release the parsed name and return the chain result
