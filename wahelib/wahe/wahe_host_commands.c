@@ -84,6 +84,10 @@ static enum wahe_host_cmd_result wahe_hcmd_shrink_memory(wahe_module_t *ctx, con
 	if (end == 0)
 		return WAHE_HOST_CMD_NOT_HANDLED;
 
+	// Ignore shrink requests for Wasmtime memory because WebAssembly memory cannot shrink
+	if (ctx->type == WAHE_MODULE_WASMTIME)
+		return WAHE_HOST_CMD_HANDLED;
+
 	// Decommit only valid shrinkage within an existing reservation
 	if (ctx->memory_reserve_size == 0)
 		fprintf_rl(stderr, "Virtual memory of module %s has not been initialised\n", ctx->module_name);
