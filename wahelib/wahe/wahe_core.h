@@ -171,6 +171,9 @@ typedef struct
 	wahe_cmd_reg_t *cmd_reg;
 	size_t cmd_reg_count, cmd_reg_as;
 	int max_cmd_word_count, host_commands_registered;
+
+	uint8_t *cita_index;
+	size_t cita_index_size;
 } wahe_group_t;
 
 extern _Thread_local wahe_chain_t *wahe_cur_chain;

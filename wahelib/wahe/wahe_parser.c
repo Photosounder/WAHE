@@ -416,9 +416,70 @@ end:
 	free_2d(line_array, 1);
 }
 
+void wahe_group_create_cita_index(wahe_group_t *group)
+{
+	static const char cita_index_magic[] = "WAHE CITA Index";
+	enum { cita_index_header_size = 32, cita_index_entry_field_count = 8 };
+	size_t linear_memory_count = 0;
+
+	// Count only modules that expose a linear-memory base address
+	for (size_t i=0; i < group->module_count; i++)
+		if (group->module[i].memory_ptr)
+			linear_memory_count++;
+
+	// Reject index sizes that cannot fit in the host address space
+	if (linear_memory_count > (SIZE_MAX - cita_index_header_size) / (cita_index_entry_field_count * sizeof(uint64_t)))
+	{
+		fprintf_rl(stderr, "Cannot create CITA index for %zu linear-memory modules because its size would overflow\n", linear_memory_count);
+		return;
+	}
+	size_t index_size = cita_index_header_size + linear_memory_count * cita_index_entry_field_count * sizeof(uint64_t);
+
+	// Release the previous index before replacing it during group reinitialisation
+	if (group->cita_index)
+		wahe_virtual_memory_free(group->cita_index, group->cita_index_size);
+	group->cita_index = NULL;
+	group->cita_index_size = 0;
+
+	// Reserve and commit the complete process-scannable index range
+	uint8_t *index = wahe_virtual_memory_alloc(index_size, index_size);
+	if (index == NULL)
+		return;
+	memset(index, 0, index_size);
+	group->cita_index = index;
+	group->cita_index_size = index_size;
+
+	// Write the fixed header and number of indexed modules
+	memcpy(index, cita_index_magic, sizeof(cita_index_magic));
+	uint64_t linear_memory_count_u64 = linear_memory_count;
+	memcpy(&index[16], &linear_memory_count_u64, sizeof(linear_memory_count_u64));
+
+	// Write each linear-memory module's fixed metadata and live-value sources
+	uint64_t *entry = (uint64_t *) &index[cita_index_header_size];
+	for (size_t i=0; i < group->module_count; i++)
+	{
+		wahe_module_t *ctx = &group->module[i];
+		if (ctx->memory_ptr == NULL)
+			continue;
+
+		entry[0] = (uint64_t) (uintptr_t) ctx->module_name;
+		entry[1] = (uint64_t) (uintptr_t) ctx->wahe_name;
+		entry[2] = (uint64_t) (uintptr_t) ctx->memory_ptr;
+		entry[3] = (uint64_t) ctx->heap_base;
+		entry[4] = (uint64_t) ctx->stack_base;
+		entry[5] = (uint64_t) ctx->data_end;
+		entry[6] = (uint64_t) (uintptr_t) (ctx->memory_size_addr ? ctx->memory_size_addr : &ctx->memory_size);
+		entry[7] = (uint64_t) (uintptr_t) ctx->stack_ptr_addr;
+		entry += cita_index_entry_field_count;
+	}
+}
+
 void wahe_group_init(wahe_group_t *group)
 {
 	// Send an Init message to all modules
 	for (int i = 0; i < group->module_count; i++)
 		wahe_send_input(&group->module[i], "Init");
+
+	// Create the CITA index after module initialization established linear memory
+	wahe_group_create_cita_index(group);
 }
