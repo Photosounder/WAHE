@@ -124,21 +124,13 @@ static enum wahe_host_cmd_result wahe_hcmd_run_chain(wahe_module_t *ctx, const c
 	// Execute a chain that was found
 	if (chain_to_run)
 	{
-		// Prefix optional input with the calling module's memory address
+		// Use the calling module to interpret optional input buffer locations
 		const char *input_msg = NULL;
-		char *prefixed_input_msg = NULL;
 		if (input_start)
-		{
-			if (ctx->memory_ptr)
-				prefixed_input_msg = sprintf_alloc("From memory %#zx\n%s", (size_t) ctx->memory_ptr, &(*line)[input_start]);
-			else
-				prefixed_input_msg = sprintf_alloc("%s", &(*line)[input_start]);
-			input_msg = prefixed_input_msg;
-		}
+			input_msg = &(*line)[input_start];
 
-		// Execute the chain and release its temporary input
-		char *end_msg = wahe_execute_chain(chain_to_run, input_msg);
-		free(prefixed_input_msg);
+		// Execute the chain synchronously with the caller as its input source
+		char *end_msg = wahe_execute_chain_from_module(chain_to_run, input_msg, ctx);
 
 		// Find the module whose memory contains the last message
 		wahe_module_t *end_module = NULL;

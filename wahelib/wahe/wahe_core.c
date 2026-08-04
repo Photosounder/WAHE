@@ -1,3 +1,6 @@
+#include <errno.h>
+#include <limits.h>
+
 #ifdef _WIN32
 	#include <memoryapi.h>
 	#include <sysinfoapi.h>
@@ -652,9 +655,22 @@ char *call_module_func_on_runner(wahe_module_t *ctx, size_t runner_id, size_t me
 	// Return pointer to return message
 	if (ctx->type == WAHE_MODULE_NATIVE)
 		return (char *) *ret_msg_addr;
-	if (*ret_msg_addr)
-		return (char *) &ctx->memory_ptr[*ret_msg_addr];
-	return NULL;
+	if (*ret_msg_addr == 0)
+		return NULL;
+
+	// Reject return addresses outside a Wasm module's active linear memory
+	wahe_refresh_module_memory_size(ctx);
+	if ((ctx->type != WAHE_MODULE_WASMTIME && ctx->type != WAHE_MODULE_WASM_TO_NATIVE) ||
+		ctx->memory_ptr == NULL || *ret_msg_addr >= ctx->memory_size)
+	{
+		fprintf_rl(stderr, "Module %s returned invalid message address %#zx for its %zu-byte active memory\n",
+			ctx->module_name, *ret_msg_addr, ctx->memory_size);
+		*ret_msg_addr = 0;
+		return NULL;
+	}
+
+	// Convert the validated linear-memory offset to a host pointer
+	return (char *) &ctx->memory_ptr[*ret_msg_addr];
 }
 
 size_t call_module_malloc(wahe_module_t *ctx, size_t size)
@@ -1293,23 +1309,432 @@ void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size
 	memcpy(dst_module ? &dst_module->memory_ptr[dst_addr] : (void *) dst_addr, src_module ? &src_module->memory_ptr[src_addr] : (void *) src_addr, copy_size);
 }
 
+typedef struct
+{
+	size_t address_start, address_end;
+	size_t copy_size, src_addr, dst_addr, payload_offset;
+	const uint8_t *src_ptr;
+	int copy_payload;
+} wahe_message_location_t;
+
+static int wahe_align_transfer_size(size_t value, size_t alignment, size_t *aligned_value)
+{
+	// Reject invalid alignments and additions that would overflow
+	if (alignment == 0 || value > SIZE_MAX - (alignment - 1))
+		return 0;
+
+	// Round the value up to the requested power-of-two alignment
+	*aligned_value = (value + alignment - 1) & ~(alignment - 1);
+	return 1;
+}
+
+static int wahe_measure_transfer_message(wahe_module_t *src_module, const char *src_message, size_t *message_len)
+{
+	// Reject missing message pointers
+	if (src_message == NULL)
+		return 0;
+
+	// Validate messages stored in a source module's linear memory
+	if (src_module && src_module->memory_ptr && src_module->type != WAHE_MODULE_NATIVE)
+	{
+		wahe_refresh_module_memory_size(src_module);
+		uintptr_t memory_start = (uintptr_t) src_module->memory_ptr;
+		uintptr_t message_start = (uintptr_t) src_message;
+		if (src_module->memory_size <= UINTPTR_MAX - memory_start &&
+			message_start >= memory_start && message_start < memory_start + src_module->memory_size)
+		{
+			size_t remaining_size = src_module->memory_size - (message_start - memory_start);
+			const char *message_end = memchr(src_message, '\0', remaining_size);
+			if (message_end == NULL)
+			{
+				fprintf_rl(stderr, "Cannot transfer an unterminated message from module %s at offset %#zx\n",
+					src_module->module_name, (size_t) (message_start - memory_start));
+				return 0;
+			}
+			*message_len = message_end - src_message;
+			return 1;
+		}
+
+		// Reject out-of-memory pointers from modules that cannot access host memory
+		if (!src_module->has_host_mem_access)
+		{
+			fprintf_rl(stderr, "Cannot transfer message pointer %p outside module %s's %zu-byte active memory\n",
+				(const void *) src_message, src_module->module_name, src_module->memory_size);
+			return 0;
+		}
+	}
+
+	// Measure direct host messages whose bounds are not represented by a module
+	*message_len = strlen(src_message);
+	return 1;
+}
+
+static int wahe_resolve_transfer_source(wahe_module_t *src_module, size_t src_addr, size_t copy_size,
+		const uint8_t **src_ptr, int *is_module_offset)
+{
+	const size_t host_address_bit = (size_t) 1 << (sizeof(size_t) * CHAR_BIT - 1);
+
+	// Treat a source without a module context as a direct host address
+	if (src_module == NULL)
+	{
+		if ((src_addr == 0 && copy_size) || src_addr > SIZE_MAX - copy_size)
+		{
+			fprintf_rl(stderr, "Cannot transfer %zu bytes from invalid direct host address %#zx\n", copy_size, src_addr);
+			return 0;
+		}
+		*src_ptr = (const uint8_t *) src_addr;
+		*is_module_offset = 0;
+		return 1;
+	}
+
+	// Treat native-module addresses as direct host addresses
+	if (src_module->type == WAHE_MODULE_NATIVE)
+	{
+		if ((src_addr == 0 && copy_size) || src_addr > SIZE_MAX - copy_size)
+		{
+			fprintf_rl(stderr, "Cannot transfer %zu bytes from invalid host address %#zx in native module %s\n",
+				copy_size, src_addr, src_module->module_name);
+			return 0;
+		}
+		*src_ptr = (const uint8_t *) src_addr;
+		*is_module_offset = 0;
+		return 1;
+	}
+
+	// Accept ranges contained in the source module's active linear memory
+	wahe_refresh_module_memory_size(src_module);
+	if (src_module->memory_ptr && src_addr <= src_module->memory_size && copy_size <= src_module->memory_size - src_addr)
+	{
+		*src_ptr = &src_module->memory_ptr[src_addr];
+		*is_module_offset = 1;
+		return 1;
+	}
+
+	// Decode host addresses explicitly tagged by transpiled Wasm64
+	if (src_module->type == WAHE_MODULE_WASM_TO_NATIVE && src_module->memory_bits == 64 && (src_addr & host_address_bit))
+	{
+		size_t host_addr = src_addr & ~host_address_bit;
+		if ((host_addr == 0 && copy_size) || host_addr > SIZE_MAX - copy_size)
+		{
+			fprintf_rl(stderr, "Cannot transfer %zu bytes from invalid tagged host address %#zx in module %s\n",
+				copy_size, src_addr, src_module->module_name);
+			return 0;
+		}
+		*src_ptr = (const uint8_t *) host_addr;
+		*is_module_offset = 0;
+		return 1;
+	}
+
+	// Report locations outside the address space available to the source module
+	fprintf_rl(stderr, "Cannot transfer %zu bytes at address %#zx from module %s with a %zu-byte active memory\n",
+		copy_size, src_addr, src_module->module_name, src_module->memory_size);
+	return 0;
+}
+
+static int wahe_prepare_transfer_location(wahe_module_t *src_module, wahe_module_t *dst_module,
+		wahe_message_location_t *location)
+{
+	const size_t host_address_bit = (size_t) 1 << (sizeof(size_t) * CHAR_BIT - 1);
+	int is_module_offset = 0;
+
+	// Resolve the source range to a host pointer
+	if (!wahe_resolve_transfer_source(src_module, location->src_addr, location->copy_size,
+			&location->src_ptr, &is_module_offset))
+		return 0;
+
+	// Use zero as the canonical address for an empty buffer
+	if (location->copy_size == 0)
+	{
+		location->dst_addr = 0;
+		return 1;
+	}
+
+	// Preserve offsets that already refer to the destination's linear memory
+	wahe_refresh_module_memory_size(dst_module);
+	if (is_module_offset && src_module && src_module->memory_ptr == dst_module->memory_ptr &&
+		location->src_addr <= dst_module->memory_size &&
+		location->copy_size <= dst_module->memory_size - location->src_addr)
+	{
+		location->dst_addr = location->src_addr;
+		return 1;
+	}
+
+	// Expose the source pointer directly to destinations with host-memory access
+	if (dst_module->has_host_mem_access)
+	{
+		size_t host_addr = (size_t) location->src_ptr;
+		if (dst_module->type == WAHE_MODULE_WASM_TO_NATIVE)
+		{
+			if (host_addr & host_address_bit)
+			{
+				fprintf_rl(stderr, "Cannot encode host address %#zx for transpiled Wasm64 module %s\n",
+					host_addr, dst_module->module_name);
+				return 0;
+			}
+			host_addr |= host_address_bit;
+		}
+		location->dst_addr = host_addr;
+		return 1;
+	}
+
+	// Mark inaccessible source data for inclusion after the destination message
+	location->copy_payload = 1;
+	return 1;
+}
+
 size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module, size_t dst_runner_id)
 {
-	// Reject invalid module-to-module message transfers
-	if (src_module == NULL || dst_module == NULL || src_message == NULL || src_module->valid == 0 || dst_module->valid == 0)
+	enum { payload_alignment = 16 };
+	const size_t max_address_len = 2 + sizeof(size_t) * 3;
+	const char location_prefix[] = "location: ";
+	const char bytes_at[] = " bytes at ";
+	wahe_message_location_t *location = NULL;
+	size_t location_count = 0, location_capacity = 0;
+	size_t message_len = 0, message_capacity = 0, allocation_size = 0;
+	size_t dst_message_addr = 0;
+
+	// Reject invalid source and destination metadata
+	if (dst_module == NULL || src_message == NULL || dst_module->valid == 0 || (src_module && src_module->valid == 0))
 	{
-		fprintf_rl(stderr, "Cannot copy a message between modules %s and %s using source pointer %p\n",
-				src_module ? src_module->module_name : "(null)",
-				dst_module ? dst_module->module_name : "(null)",
-				(const void *) src_message);
+		fprintf_rl(stderr, "Cannot transfer a message between modules %s and %s using source pointer %p\n",
+			src_module ? src_module->module_name : "(host)",
+			dst_module ? dst_module->module_name : "(null)",
+			(const void *) src_message);
 		return 0;
 	}
 
-	// Prefix the message in memory allocated through the selected destination runner
-	if (src_module->memory_ptr)
-		return module_sprintf_alloc_on_runner(dst_module, dst_runner_id, "From memory %#zx\n%s", (size_t) src_module->memory_ptr, src_message);
+	// Measure the source message without crossing known linear-memory bounds
+	if (!wahe_measure_transfer_message(src_module, src_message, &message_len))
+		return 0;
+	if (message_len == SIZE_MAX)
+	{
+		fprintf_rl(stderr, "Cannot transfer a message whose terminating null would overflow its size\n");
+		return 0;
+	}
+	message_capacity = message_len + 1;
+
+	// Find every numeric location descriptor in the message
+	for (const char *search = src_message; search < src_message + message_len;)
+	{
+		const char *prefix = strstr(search, location_prefix);
+		if (prefix == NULL || prefix >= src_message + message_len)
+			break;
+
+		const char *size_start = prefix + sizeof(location_prefix) - 1;
+		if (*size_start < '0' || *size_start > '9')
+		{
+			search = size_start;
+			continue;
+		}
+
+		// Parse the decimal byte count
+		errno = 0;
+		char *size_end = NULL;
+		uintmax_t parsed_size = strtoumax(size_start, &size_end, 10);
+		if (errno == ERANGE || parsed_size > SIZE_MAX)
+		{
+			fprintf_rl(stderr, "Cannot transfer a message containing an oversized location byte count near \"%s\"\n", prefix);
+			free(location);
+			return 0;
+		}
+
+		// Require the established separator after a numeric byte count
+		if (strncmp(size_end, bytes_at, sizeof(bytes_at) - 1) != 0)
+		{
+			fprintf_rl(stderr, "Cannot transfer a malformed location descriptor near \"%s\"\n", prefix);
+			free(location);
+			return 0;
+		}
+
+		const char *address_start = size_end + sizeof(bytes_at) - 1;
+		if ((*address_start < '0' || *address_start > '9') && *address_start != '-')
+		{
+			fprintf_rl(stderr, "Cannot transfer a location descriptor without a numeric address near \"%s\"\n", prefix);
+			free(location);
+			return 0;
+		}
+
+		// Parse the base-detected address accepted by the established %zi format
+		errno = 0;
+		char *address_end = NULL;
+		uintmax_t parsed_address = 0;
+		if (*address_start == '-')
+		{
+			intmax_t signed_address = strtoimax(address_start, &address_end, 0);
+			parsed_address = (size_t) signed_address;
+		}
+		else
+			parsed_address = strtoumax(address_start, &address_end, 0);
+		if (errno == ERANGE || parsed_address > SIZE_MAX || address_end == address_start ||
+			(*address_start == '-' && address_end == address_start + 1))
+		{
+			fprintf_rl(stderr, "Cannot transfer a message containing an invalid location address near \"%s\"\n", prefix);
+			free(location);
+			return 0;
+		}
+
+		// Grow the host-side descriptor list without retaining it after this transfer
+		if (location_count == location_capacity)
+		{
+			size_t new_capacity = location_capacity ? location_capacity * 2 : 4;
+			if (new_capacity < location_capacity || new_capacity > SIZE_MAX / sizeof(*location))
+			{
+				fprintf_rl(stderr, "Cannot transfer a message containing too many location descriptors\n");
+				free(location);
+				return 0;
+			}
+			void *new_location = realloc(location, new_capacity * sizeof(*location));
+			if (new_location == NULL)
+			{
+				fprintf_rl(stderr, "Cannot allocate metadata for %zu message location descriptors\n", new_capacity);
+				free(location);
+				return 0;
+			}
+			location = new_location;
+			location_capacity = new_capacity;
+		}
+
+		// Record the source range and replacement span
+		wahe_message_location_t *current = &location[location_count++];
+		memset(current, 0, sizeof(*current));
+		current->address_start = address_start - src_message;
+		current->address_end = address_end - src_message;
+		current->copy_size = (size_t) parsed_size;
+		current->src_addr = (size_t) parsed_address;
+		if (!wahe_prepare_transfer_location(src_module, dst_module, current))
+		{
+			free(location);
+			return 0;
+		}
+
+		// Reserve enough text space for the longest rewritten hexadecimal address
+		size_t old_address_len = current->address_end - current->address_start;
+		if (old_address_len < max_address_len)
+		{
+			size_t added_len = max_address_len - old_address_len;
+			if (message_capacity > SIZE_MAX - added_len)
+			{
+				fprintf_rl(stderr, "Cannot transfer a message whose rewritten text size would overflow\n");
+				free(location);
+				return 0;
+			}
+			message_capacity += added_len;
+		}
+
+		search = address_end;
+	}
+
+	// Place copied payloads after an aligned maximum-size message region
+	if (!wahe_align_transfer_size(message_capacity, payload_alignment, &allocation_size))
+	{
+		fprintf_rl(stderr, "Cannot align a %zu-byte transferred message allocation\n", message_capacity);
+		free(location);
+		return 0;
+	}
+	for (size_t i = 0; i < location_count; i++)
+	{
+		if (!location[i].copy_payload)
+			continue;
+
+		// Align each copied payload independently inside the combined allocation
+		if (!wahe_align_transfer_size(allocation_size, payload_alignment, &location[i].payload_offset) ||
+			location[i].copy_size > SIZE_MAX - location[i].payload_offset)
+		{
+			fprintf_rl(stderr, "Cannot fit a %zu-byte payload into a transferred message allocation\n", location[i].copy_size);
+			free(location);
+			return 0;
+		}
+		allocation_size = location[i].payload_offset + location[i].copy_size;
+	}
+
+	// Allocate the combined message and payload block through the destination runner
+	dst_message_addr = call_module_malloc_on_runner(dst_module, dst_runner_id, allocation_size);
+	if (dst_message_addr == 0)
+	{
+		free(location);
+		return 0;
+	}
+
+	// Resolve and validate the destination allocation as a host pointer
+	uint8_t *dst_memory = NULL;
+	if (dst_module->type == WAHE_MODULE_NATIVE)
+		dst_memory = (uint8_t *) dst_message_addr;
 	else
-		return module_sprintf_alloc_on_runner(dst_module, dst_runner_id, "%s", src_message);
+	{
+		wahe_refresh_module_memory_size(dst_module);
+		if (dst_module->memory_ptr == NULL || dst_message_addr > dst_module->memory_size ||
+			allocation_size > dst_module->memory_size - dst_message_addr)
+		{
+			fprintf_rl(stderr, "Module %s allocated an invalid %zu-byte message block at offset %#zx in its %zu-byte memory\n",
+				dst_module->module_name, allocation_size, dst_message_addr, dst_module->memory_size);
+			call_module_free_on_runner(dst_module, dst_runner_id, dst_message_addr);
+			free(location);
+			return 0;
+		}
+		dst_memory = &dst_module->memory_ptr[dst_message_addr];
+	}
+
+	// Finish addresses that point to payloads packed after the message
+	for (size_t i = 0; i < location_count; i++)
+		if (location[i].copy_payload)
+		{
+			if (dst_message_addr > SIZE_MAX - location[i].payload_offset)
+			{
+				fprintf_rl(stderr, "Cannot represent a copied payload address in module %s\n", dst_module->module_name);
+				call_module_free_on_runner(dst_module, dst_runner_id, dst_message_addr);
+				free(location);
+				return 0;
+			}
+			location[i].dst_addr = dst_message_addr + location[i].payload_offset;
+		}
+
+	// Rewrite location addresses while copying the message text
+	size_t read_pos = 0, write_pos = 0;
+	for (size_t i = 0; i < location_count; i++)
+	{
+		size_t unchanged_len = location[i].address_start - read_pos;
+		memcpy(&dst_memory[write_pos], &src_message[read_pos], unchanged_len);
+		write_pos += unchanged_len;
+
+		int address_len;
+		const size_t host_address_bit = (size_t) 1 << (sizeof(size_t) * CHAR_BIT - 1);
+		if (location[i].dst_addr & host_address_bit)
+			address_len = snprintf((char *) &dst_memory[write_pos], message_capacity - write_pos,
+				"%" PRIdMAX, (intmax_t) location[i].dst_addr);
+		else
+			address_len = snprintf((char *) &dst_memory[write_pos], message_capacity - write_pos,
+				"%#zx", location[i].dst_addr);
+		if (address_len < 0 || (size_t) address_len >= message_capacity - write_pos)
+		{
+			fprintf_rl(stderr, "Cannot format a rewritten location address for module %s\n", dst_module->module_name);
+			call_module_free_on_runner(dst_module, dst_runner_id, dst_message_addr);
+			free(location);
+			return 0;
+		}
+		write_pos += (size_t) address_len;
+		read_pos = location[i].address_end;
+	}
+
+	// Copy the remainder including the terminating null byte
+	size_t tail_len = message_len - read_pos + 1;
+	if (tail_len > message_capacity - write_pos)
+	{
+		fprintf_rl(stderr, "Rewritten message for module %s exceeded its %zu-byte text reservation\n",
+			dst_module->module_name, message_capacity);
+		call_module_free_on_runner(dst_module, dst_runner_id, dst_message_addr);
+		free(location);
+		return 0;
+	}
+	memcpy(&dst_memory[write_pos], &src_message[read_pos], tail_len);
+
+	// Copy inaccessible payloads into their regions of the combined allocation
+	for (size_t i = 0; i < location_count; i++)
+		if (location[i].copy_payload && location[i].copy_size)
+			memcpy(&dst_memory[location[i].payload_offset], location[i].src_ptr, location[i].copy_size);
+
+	// Release temporary host metadata while returning destination ownership
+	free(location);
+	return dst_message_addr;
 }
 
 size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module)
@@ -1520,22 +1945,27 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 
 			// Copy message to cmd processing module
 			size_t dst_addr = wahe_copy_message_between_modules(ctx, message, dst_module);
+			if (dst_addr == 0)
+				return 0;
 
 			// Call cmd processing function
 			chain->current_cmd_proc_id++;
-			size_t return_msg_addr_dst = (size_t) call_module_func(dst_module, dst_addr, WAHE_FUNC_PROC_CMD, 0);
-			if (return_msg_addr_dst)
-				return_msg_addr_dst -= (size_t) dst_module->memory_ptr;
+			char *return_msg_dst = call_module_func(dst_module, dst_addr, WAHE_FUNC_PROC_CMD, 0);
 			call_module_free(dst_module, dst_addr);
 
 			if (chain->current_cmd_proc_id == eo->cmd_proc_count)
 				chain->current_cmd_proc_id = 0;
 
 			// Copy and return the return message
-			if (return_msg_addr_dst)
+			if (return_msg_dst)
 			{
-				// Copy the processed message with its source memory address
-				return_msg_addr = wahe_copy_message_between_modules(dst_module, &dst_module->memory_ptr[return_msg_addr_dst], ctx);
+				// Transfer the processed message and its described payloads back to the caller
+				return_msg_addr = wahe_copy_message_between_modules(dst_module, return_msg_dst, ctx);
+
+				// Free the command processor's returned allocation after copying it
+				size_t return_msg_addr_dst = (size_t) return_msg_dst;
+				if (dst_module->type != WAHE_MODULE_NATIVE)
+					return_msg_addr_dst -= (size_t) dst_module->memory_ptr;
 				call_module_free(dst_module, return_msg_addr_dst);
 				return return_msg_addr;
 			}
@@ -1585,8 +2015,17 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 					if (reg->module_id == ctx->module_id)
 						continue;
 
+					// Transfer the command and any described payloads to the registered module
 					wahe_module_t *registered_module = &group->module[reg->module_id];
-					char *ret_msg = wahe_send_input(registered_module, "From memory %#zx\n%s", (size_t) ctx->memory_ptr, line);
+					size_t registered_msg_addr = wahe_copy_message_between_modules(ctx, line, registered_module);
+					if (registered_msg_addr == 0)
+						return 0;
+
+					// Call the registered module and release its combined input allocation
+					char *ret_msg = call_module_func(registered_module, registered_msg_addr, WAHE_FUNC_INPUT, 0);
+					call_module_free(registered_module, registered_msg_addr);
+
+					// Transfer any response back into the original calling module
 					if (ret_msg)
 						return_msg_addr = wahe_copy_message_between_modules(registered_module, ret_msg, ctx);
 					return return_msg_addr;

@@ -1,4 +1,4 @@
-char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
+char *wahe_execute_chain_from_module(wahe_chain_t *chain, const char *input_msg, wahe_module_t *input_src_module)
 {
 	// Preserve the caller's chain across nested execution
 	wahe_chain_t *previous_chain = wahe_cur_chain;
@@ -47,6 +47,10 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 		{
 			wahe_module_t *exec_module = &group->module[eo->module_id];
 			wahe_module_t *src_module = NULL, *dst_module = NULL;
+			int input_transfer_failed = 0;
+
+			// Clear the per-run input address while retaining existing execution-order behavior
+			eo->dst_msg_addr = 0;
 
 			// Handle the connection that feeds into this EO's function
 			if (conn)
@@ -67,13 +71,25 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 							if (src_module->type == WAHE_MODULE_NATIVE)
 								src_message = (const char *) src_addr;
 							else if (src_module->type == WAHE_MODULE_WASMTIME || src_module->type == WAHE_MODULE_WASM_TO_NATIVE)
-								src_message = (const char *) &src_module->memory_ptr[src_addr];
+							{
+								// Reject stale or malformed return offsets before forming a host pointer
+								if (src_module->memory_ptr && src_addr < src_module->memory_size)
+									src_message = (const char *) &src_module->memory_ptr[src_addr];
+								else
+									fprintf_rl(stderr, "Cannot read return message offset %#zx from module %s with a %zu-byte active memory\n",
+										src_addr, src_module->module_name, src_module->memory_size);
+							}
 							else
 								fprintf_rl(stderr, "Cannot read a return message from module %s with invalid module type %d\n", src_module->module_name, src_module->type);
 
 							// Copy only addresses with known module semantics
 							if (src_message)
+							{
 								eo->dst_msg_addr = wahe_copy_message_between_modules_on_runner(src_module, src_message, dst_module, eo->runner_id);
+								input_transfer_failed = eo->dst_msg_addr == 0;
+							}
+							else
+								input_transfer_failed = 1;
 						}
 						break;
 
@@ -82,16 +98,23 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 
 						if (input_msg)
 						{
-							size_t copy_size = strlen(input_msg) + 1;
-							eo->dst_msg_addr = call_module_malloc_on_runner(dst_module, eo->runner_id, copy_size);
-							if (eo->dst_msg_addr)
-								wahe_copy_between_memories(NULL, (size_t) input_msg, copy_size, dst_module, eo->dst_msg_addr);
+							// Transfer chain input using the calling module as its address context
+							eo->dst_msg_addr = wahe_copy_message_between_modules_on_runner(input_src_module, input_msg, dst_module, eo->runner_id);
+							input_transfer_failed = eo->dst_msg_addr == 0;
 						}
 						break;
 
 					default:
 						break;
 				}
+			}
+
+			// Skip calls whose input could not be transferred safely
+			if (input_transfer_failed)
+			{
+				eo->ret_msg_addr = 0;
+				last_msg = NULL;
+				continue;
 			}
 
 			// Call function
@@ -137,6 +160,12 @@ char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
 	// Restore the caller's chain after nested chain execution
 	wahe_cur_chain = previous_chain;
 	return last_msg;
+}
+
+char *wahe_execute_chain(wahe_chain_t *chain, const char *input_msg)
+{
+	// Treat messages passed by direct host callers as containing host addresses
+	return wahe_execute_chain_from_module(chain, input_msg, NULL);
 }
 
 void wahe_blit_group_displays(wahe_group_t *group)
