@@ -436,6 +436,10 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
 		ctx->data_end = wahe_get_module_symbol_address(ctx, "__data_end", 0);
 	}
+
+	// Derive host memory access from the final module type and address width
+	ctx->has_host_mem_access = ctx->type == WAHE_MODULE_NATIVE ||
+		(ctx->type == WAHE_MODULE_WASM_TO_NATIVE && ctx->memory_bits == 64);
 }
 
 static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_id, size_t *arg, int arg_count, enum wahe_func_id func_id)

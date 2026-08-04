@@ -67,7 +67,7 @@ struct wahe_module_t
 
 	uint8_t *memory_ptr;
 	size_t stack_base, data_end, heap_base, memory_size, memory_reserve_size, *memory_size_addr, *stack_ptr_addr, cita_time_addr;
-	int8_t memory_bits;
+	int8_t memory_bits, has_host_mem_access;
 	uint32_t page_count_initial, page_count_max;
 
 	// Specific to WASM modules
