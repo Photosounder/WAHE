@@ -162,13 +162,12 @@ static int wahe_init_module_memory(wahe_module_t *ctx)
 	if (ctx == NULL)
 		return 1;
 
-	// Read the fixed memory address exported by a wasm-to-native module
+	// Validate the per-instance fixed memory address returned by a wasm-to-native module
 	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
 	{
-		ctx->memory_ptr = *ctx->native_memory;
 		if (ctx->memory_ptr == NULL)
 		{
-			fprintf_rl(stderr, "Wasm-to-native module %s did not initialise its exported memory pointer\n", ctx->module_name);
+			fprintf_rl(stderr, "Wasm-to-native module %s did not initialise its instance memory pointer\n", ctx->module_name);
 			return 0;
 		}
 		if (ctx->memory_size_addr)
@@ -397,16 +396,37 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 
 	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 	{
-		// Identify a wasm-to-native module by its exported memory pointer
-		ctx->native_memory = (uint8_t **) wahe_get_module_symbol_address(ctx, "mem0", 0);
-		ctx->type = ctx->native_memory ? WAHE_MODULE_WASM_TO_NATIVE : WAHE_MODULE_NATIVE;
+		// Identify a wasm-to-native module by its per-instance creation entry point
+		void *(*wasm_decomp_instance_create)(void *, void *, wahe_wasm_decomp_instance_info_t *) = dynlib_find_symbol(ctx->native, "wasm_decomp_instance_create");
+		ctx->type = wasm_decomp_instance_create ? WAHE_MODULE_WASM_TO_NATIVE : WAHE_MODULE_NATIVE;
 
 		if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
 		{
-			// Send the host callback to the translated Wasm runtime
-			void (*wasm_decomp_init)(void *, void *) = dynlib_find_symbol(ctx->native, "wasm_decomp_init");
-			if (wasm_decomp_init)
-				wasm_decomp_init(ctx, wahe_run_command_with_id_native);
+			// Load the activation and state-query functions shared by all instances of this DLL
+			ctx->wasm_decomp_instance_enter = dynlib_find_symbol(ctx->native, "wasm_decomp_instance_enter");
+			ctx->wasm_decomp_instance_leave = dynlib_find_symbol(ctx->native, "wasm_decomp_instance_leave");
+			ctx->wasm_decomp_instance_destroy = dynlib_find_symbol(ctx->native, "wasm_decomp_instance_destroy");
+			ctx->wasm_decomp_instance_global_address = dynlib_find_symbol(ctx->native, "wasm_decomp_instance_global_address");
+			if (ctx->wasm_decomp_instance_enter == NULL || ctx->wasm_decomp_instance_leave == NULL ||
+				ctx->wasm_decomp_instance_destroy == NULL || ctx->wasm_decomp_instance_global_address == NULL)
+			{
+				fprintf_rl(stderr, "Wasm-to-native module %s does not export its complete per-instance ABI\n", ctx->module_name);
+				ctx->valid = 0;
+				return;
+			}
+
+			// Create this WAHE module's independent translated state and linear memory
+			wahe_wasm_decomp_instance_info_t instance_info = {0};
+			ctx->wasm_decomp_instance = wasm_decomp_instance_create(ctx, wahe_run_command_with_id_native, &instance_info);
+			if (ctx->wasm_decomp_instance == NULL || instance_info.memory_ptr == NULL || instance_info.memory_size_addr == NULL)
+			{
+				fprintf_rl(stderr, "Creating a translated Wasm instance for module %s failed\n", ctx->module_name);
+				ctx->valid = 0;
+				return;
+			}
+			ctx->memory_ptr = instance_info.memory_ptr;
+			ctx->memory_size_addr = instance_info.memory_size_addr;
+			ctx->memory_size = *ctx->memory_size_addr;
 
 			// Initialise the translated module's memory buffer
 			call_module_free(ctx, 0);
@@ -421,16 +441,19 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 				if (addr)
 					ctx->heap_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
 
-				addr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
-				ctx->stack_ptr_addr = (size_t *) addr;
+				// Resolve the mutable stack pointer through this instance's global slots
+				addr = wahe_get_module_symbol_address(ctx, "wasm_decomp_stack_pointer_global_index", 0);
 				if (addr)
-					ctx->stack_base = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
+				{
+					size_t global_index = *(size_t *) addr;
+					ctx->stack_ptr_addr = ctx->wasm_decomp_instance_global_address(ctx->wasm_decomp_instance, global_index);
+					if (ctx->stack_ptr_addr)
+						ctx->stack_base = ctx->memory_bits == 32 ? *(uint32_t *) ctx->stack_ptr_addr : *(uint64_t *) ctx->stack_ptr_addr;
+				}
 
 				addr = wahe_get_module_symbol_address(ctx, "__data_end", 0);
 				if (addr)
 					ctx->data_end = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
-
-				ctx->memory_size_addr = (size_t *) wahe_get_module_symbol_address(ctx, "mem0_size", 0);
 			}
 		}
 	}
@@ -469,7 +492,9 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 	// Reject calls into modules that did not initialise successfully
 	if (!ctx->valid)
 	{
-		fprintf_rl(stderr, "Cannot call %s:%s() because the module is invalid\n", ctx->module_name, wahe_func_name[func_id]);
+		static bool once = 1;
+		if (once) fprintf_rl(stderr, "Cannot call %s:%s() because the module is invalid\n", ctx->module_name, wahe_func_name[func_id]);
+		once = 0;
 		return 0;
 	}
 
@@ -490,6 +515,19 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 			return 0;
 		}
 
+		// Activate only the translated instance selected by this WAHE module
+		void *previous_instance = NULL;
+		if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
+		{
+			if (ctx->wasm_decomp_instance == NULL || ctx->wasm_decomp_instance_enter == NULL || ctx->wasm_decomp_instance_leave == NULL)
+			{
+				fprintf_rl(stderr, "Cannot call %s:%s() without an initialized translated instance\n", ctx->module_name, wahe_func_name[func_id]);
+				return 0;
+			}
+			previous_instance = ctx->wasm_decomp_instance_enter(ctx->wasm_decomp_instance);
+		}
+
+		// Dispatch through the native signature while the translated state is active
 		switch (func_id)
 		{
 			case WAHE_FUNC_MALLOC:
@@ -520,6 +558,10 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 				ret_val = (size_t) func((char *) arg[0]);
 			}
 		}
+
+		// Restore the translated state needed by a nested caller on this thread
+		if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
+			ctx->wasm_decomp_instance_leave(previous_instance);
 
 		return ret_val;
 	}
@@ -1237,8 +1279,8 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		return;
 	}
 
-	// Send the host callback and module context if the module is not WASM
-	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
+	// Send the host callback and module context only to directly compiled native modules
+	if (ctx->type == WAHE_MODULE_NATIVE)
 		wahe_send_input(ctx, "module_ctx = %#zx\nwahe_run_command_with_id() = %#zx", (size_t) ctx, (size_t) wahe_run_command_with_id_native);
 
 	// Register commands
