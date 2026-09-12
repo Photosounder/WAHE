@@ -266,6 +266,30 @@ static void wahe_refresh_module_memory_size(wahe_module_t *ctx)
 	#endif
 }
 
+static int wahe_blank_module_stack(wahe_module_t *ctx)
+{
+	// Ignore modules that do not use a Wasm linear memory
+	if (ctx == NULL || (ctx->type != WAHE_MODULE_WASMTIME && ctx->type != WAHE_MODULE_WASM_TO_NATIVE))
+		return 1;
+
+	// Accept modules without a declared stack region
+	if (ctx->stack_base == 0)
+		return 1;
+
+	// Reject stack regions outside the initialized linear memory
+	if (ctx->memory_ptr == NULL || ctx->stack_base > ctx->memory_size)
+	{
+		fprintf_rl(stderr, "Cannot blank stack of module %s: stack top %#zx is outside its %#zx-byte memory\n",
+			ctx->module_name, ctx->stack_base, ctx->memory_size);
+		return 0;
+	}
+
+	// Preserve static data when the stack follows it instead of using a stack-first layout
+	size_t stack_start = ctx->data_end < ctx->stack_base ? ctx->data_end : 0;
+	memset(&ctx->memory_ptr[stack_start], WAHE_STACK_BLANK_PATTERN, ctx->stack_base - stack_start);
+	return 1;
+}
+
 static size_t wahe_get_module_symbol_address_on_runner(wahe_module_t *ctx, size_t runner_id, const char *symbol_name, int verbosity)
 {
 	size_t addr = 0;
@@ -1276,6 +1300,13 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	{
 		// Report dynamic libraries that could not be loaded
 		fprintf_rl(stderr, "Could not load module %s from '%s' as Wasm or a dynamic library\n", ctx->module_name, path);
+		return;
+	}
+
+	// Blank Wasm stack space after linear-memory initialization and before module calls
+	if (!wahe_blank_module_stack(ctx))
+	{
+		ctx->valid = 0;
 		return;
 	}
 

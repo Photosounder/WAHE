@@ -1,6 +1,10 @@
 #ifndef WAHELIB_H
 #define WAHELIB_H
 
+#ifndef WAHE_STACK_BLANK_PATTERN
+  #define WAHE_STACK_BLANK_PATTERN 0xEE
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
