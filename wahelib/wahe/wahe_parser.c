@@ -82,11 +82,8 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 {
 	// group has to be a pointer with a fixed location so that pointers to it in the struct wouldn't be dereferenced
 	int i, n[4], is, il, linecount;
-	#ifdef H_ROUZICLIB
-	int image_offset = group->image_count;
-	#endif
 	char *line, **line_array = arrayise_text(load_raw_file_dos_conv(filepath, NULL), &linecount);
-	wahe_symbol_table_t symb_module={0}, symb_display={0}, symb_order={0};
+	wahe_symbol_table_t symb_module={0}, symb_order={0};
 	wahe_chain_t *chain = NULL;
 	int init = 0;
 
@@ -186,26 +183,6 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 			// Store instance name
 			group->module[is].wahe_name = make_string_copy(module_name);
 		}
-
-		// Set display
-		#ifdef H_ROUZICLIB
-		memset(n, 0, sizeof(n));
-		xy_t pos, size, offset;
-		if (sscanf(line, "Display %n%*[^:]%n: pos %lg %lg, size %lg %lg, offset %lg %lg", &n[0], &n[1], &pos.x, &pos.y, &size.x, &size.y, &offset.x, &offset.y) == 6)
-		{
-			char *display_name = make_string_copy_len(&line[n[0]], n[1]-n[0]);
-
-			// Add symbol to table
-			if (wahe_find_symbol_in_table(&symb_display, display_name) != -1)
-				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Display symbol name \"%s\" already taken.\n", filepath, il, display_name);
-
-			is = wahe_add_symbol_to_table(&symb_display, display_name) + image_offset;
-
-			// Add display
-			alloc_enough(&group->image, group->image_count = is+1, &group->image_as, sizeof(wahe_image_display_t), 1.5);
-			group->image[is].fb_area = make_rect_off(pos, size, offset);
-		}
-		#endif
 
 		// Send to
 		memset(n, 0, sizeof(n));
@@ -325,14 +302,6 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 						bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Order runner attribute \"%s\" is not a zero-indexed integer.\n", filepath, il, arg_name);
 				}
 
-				// Set image display
-				if (strcmp(attribute, "display") == 0)
-				{
-					chain->exec_order[is].display_id = wahe_find_symbol_in_table(&symb_display, arg_name);
-					if (chain->exec_order[is].display_id == -1)
-						bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Order display attribute \"%s\" not previously defined.\n", filepath, il, arg_name);
-				}
-
 				free_null(&arg_name);
 				p = &p[n[2]];
 
@@ -411,7 +380,6 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 
 end:
 	wahe_symbol_table_free(&symb_module);
-	wahe_symbol_table_free(&symb_display);
 	wahe_symbol_table_free(&symb_order);
 	free_2d(line_array, 1);
 }

@@ -15,8 +15,6 @@
 const char *wahe_eo_name[] =
 {
 	"module_func",
-	"image_display",
-	"kb_mouse",
 	"chain_input_msg"
 };
 
@@ -783,76 +781,6 @@ char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_i
 	return call_module_func_on_runner(ctx, runner_id, message_addr, func_id, call_from_eo);
 }
 
-#ifdef H_ROUZICLIB
-int wahe_pixel_format_to_raster_mode(const char *name)
-{
-	if (strcmp(name, "RGBA UQ1.15 linear") == 0)
-		return IMAGE_USE_LRGB;
-
-	if (strcmp(name, "RGBA float linear") == 0)
-		return IMAGE_USE_FRGB;
-
-	if (strcmp(name, "RGBA 8 sRGB") == 0)
-		return IMAGE_USE_SRGB;
-
-	if (strcmp(name, "RGB 10-12-10 sqrt") == 0)
-		return IMAGE_USE_SQRGB;
-
-	return IMAGE_USE_BUF;
-}
-
-int wahe_message_to_raster(wahe_module_t *ctx, size_t msg_addr, raster_t *r)
-{
-	size_t raster_size = 0, raster_address = 0;
-
-	// Report missing display messages
-	if (msg_addr == 0)
-	{
-		fprintf_rl(stderr, "Module %s did not return a framebuffer message for display\n", ctx->module_name);
-		return 0;
-	}
-
-	int ret_mode = get_raster_mode(*r);
-
-	// Pointer to the message
-	char *message = &ctx->memory_ptr[msg_addr];
-
-	// Parse each line of the message
-	for (const char *line = message; line; line = strstr_after(line, "\n"))
-	{
-		char a[32];
-
-		if (sscanf(line, "Pixel format: %31[^\n]", a) == 1)
-			ret_mode = wahe_pixel_format_to_raster_mode(a);
-
-		sscanf(line, "Framebuffer location: %zi bytes at %zi", &raster_size, &raster_address);
-		sscanf(line, "Framebuffer resolution %dx%d", &r->dim.x, &r->dim.y);
-	}
-
-	if (raster_address == 0)
-	{
-		fprintf_rl(stderr, "Framebuffer message from module %s does not contain a valid framebuffer location\n", ctx->module_name);
-		return 0;
-	}
-
-	// Reject framebuffer ranges outside active module memory
-	if (ctx->memory_ptr == NULL || raster_address > ctx->memory_size || raster_size > ctx->memory_size - raster_address)
-	{
-		fprintf_rl(stderr, "Framebuffer from module %s uses %zu bytes at offset %#zx outside its %zu-byte active memory\n", ctx->module_name, raster_size, raster_address, ctx->memory_size);
-		return 0;
-	}
-
-	// Update the host-side raster for the module framebuffer
-	*r = make_raster(&ctx->memory_ptr[raster_address], r->dim, r->dim, ret_mode);
-	cl_unref_raster(r);
-
-	if (ret_mode == IMAGE_USE_BUF)
-		r->buf_size = raster_size;
-
-	return 1;
-}
-#endif
-
 static size_t module_vsprintf_alloc_on_runner(wahe_module_t *ctx, size_t runner_id, const char *format, va_list args)
 {
 	int len;
@@ -1330,11 +1258,6 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 			ctx->cita_time_addr = ctx->heap_base + 12;
 	}
 
-	#ifdef H_ROUZICLIB
-	// Init module's textedit used for transmitting text input
-	textedit_init(&ctx->input_te, 1);
-	ctx->input_te.edit_mode = te_mode_full;
-	#endif
 }
 
 void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr)
@@ -1880,115 +1803,6 @@ size_t wahe_load_raw_file(wahe_module_t *ctx, const char *path, size_t *size)
 
 	return data_addr;
 }
-
-#ifdef H_ROUZICLIB
-void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int display_id, int conn_id)
-{
-	int i;
-	buffer_t buf = {0};
-	const char *state_name[] = { "up", "", "", "", "down", "repeat" };
-	wahe_group_t *group = chain->parent_group;
-	wahe_module_t *ctx = &group->module[module_id];
-
-	// Set textedit if framebuffer is clicked which indicates that the module is active in the interface
-	ctrl_button_state_t *butt_state = proc_mouse_rect_ctrl_lrmb(group->image[display_id].fb_rect);
-	if (butt_state[0].down || butt_state[1].down)
-		cur_textedit = &ctx->input_te;
-
-	// Determine if the control that represents the display is active
-	int mouse_active = butt_state[0].orig || butt_state[0].over || butt_state[1].orig || butt_state[1].over;
-	int kb_active = (cur_textedit == &ctx->input_te);
-
-	// Send text input
-	if (ctx->input_te.string && ctx->input_te.string[0])
-	{
-		bufprintf(&buf, "Text input (0@) ");
-
-		// Convert to 0@ format
-		size_t len = strlen(ctx->input_te.string);
-		for (int i=0; i < len; i++)
-		{
-			uint8_t c = ctx->input_te.string[i];
-			bufprintf(&buf, "%c%c", '0' + (c >> 5), '@' + (c & 0x1F));
-		}
-		bufprintf(&buf, "\n");
-
-		// Clear textedit
-		textedit_clear_then_set_new_text(&ctx->input_te, NULL);
-	}
-
-	// Go through all keys looking for newly pressed or released keys
-	if (kb_active)
-	for (i = RL_SCANCODE_A; i < RL_NUM_SCANCODES; i++)
-	{
-		if (abs(mouse.key_state[i]) >= 2)
-		{
-			bufprintf(&buf, "Key %s: %d", state_name[2 + mouse.key_state[i]], i);
-
-		#ifdef RL_SDL
-			bufprintf(&buf, " / \"%s\" / \"%s\"", SDL_GetScancodeName(i), SDL_GetKeyName(SDL_GetKeyFromScancode(i)));
-		#endif
-			bufprintf(&buf, "\n");
-		}
-	}
-
-	// Make mouse messages depending on the target display
-	if (mouse_active)
-	{
-		xy_t r_scale, r_offset;
-		rect_range_and_dim_to_scale_offset_inv(group->image[display_id].fb_rect, group->image[display_id].fb.dim, &r_scale, &r_offset, 0);
-		xy_t pix_pos = mad_xy(mouse.u, r_scale, r_offset);
-
-//if (mouse.b.lmb != -1 || mouse.b.rmb != -1)	// use this to simulate a touchscreen
-		bufprintf(&buf, "Mouse position (pixels) %.16g %.16g\n", pix_pos.x, pix_pos.y);
-
-		// Mouse delta
-		bufprintf(&buf, "Mouse delta %.16g %.16g\n", mouse.d.x, mouse.d.y);
-	}
-	else if (group->image[display_id].mouse_active)
-		bufprintf(&buf, "Mouse position (pixels) NAN NAN\n");
-
-	// Mouse buttons
-	for (i=0; i < 3; i++)
-	{
-		int b;
-		const char *b_name[] = { "left", "middle", "right" };
-
-		switch (i)
-		{
-				case 0: b = mouse.b.lmb;
-			break;	case 1: b = mouse.b.mmb;
-			break;	case 2: b = mouse.b.rmb;
-		}
-
-		if (abs(b) == 2)
-			bufprintf(&buf, "Mouse %s button %s\n", b_name[i], state_name[2 + b]);
-	}
-
-	// Mouse wheel
-	if (mouse.b.wheel)
-		bufprintf(&buf, "Mouse scroll %s %d\n", mouse.b.wheel < 0 ? "down" : "up", abs(mouse.b.wheel));
-
-	// Copy message from host memory to module memory
-	wahe_exec_order_t *dst_eo = &chain->exec_order[chain->connection[conn_id].dst_eo];
-	size_t *addr = &dst_eo->dst_msg_addr;
-	call_module_free_on_runner(&group->module[module_id], dst_eo->runner_id, *addr);
-	*addr = 0;
-
-	if (buf.buf)
-	{
-		// Allocate the input through the runner that will consume it
-		*addr = call_module_malloc_on_runner(&group->module[module_id], dst_eo->runner_id, buf.len + 1);
-		if (*addr)
-			memcpy(&group->module[module_id].memory_ptr[*addr], buf.buf, buf.len + 1);
-		free_buf(&buf);
-	}
-
-	// Remember the active statuses
-	group->image[display_id].mouse_active = mouse_active;
-	group->image[display_id].kb_active = kb_active;
-}
-#endif
 
 // Get called from the module
 size_t wahe_run_command_core(wahe_module_t *ctx, char *message)

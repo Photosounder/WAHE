@@ -359,32 +359,6 @@ static enum wahe_host_cmd_result wahe_hcmd_get_raw_time(wahe_module_t *ctx, cons
 	return WAHE_HOST_CMD_HANDLED;
 }
 
-#ifdef H_ROUZICLIB
-static enum wahe_host_cmd_result wahe_hcmd_mouse_capture(wahe_module_t *ctx, const char **line, size_t *return_msg_addr)
-{
-	(void) ctx;
-	(void) line;
-	(void) return_msg_addr;
-
-	// Capture and warp the mouse
-	mouse.b.orig = zc.offset_u;
-	mouse.warp_if_move = 1;
-	return WAHE_HOST_CMD_HANDLED;
-}
-
-static enum wahe_host_cmd_result wahe_hcmd_mouse_release(wahe_module_t *ctx, const char **line, size_t *return_msg_addr)
-{
-	(void) ctx;
-	(void) line;
-	(void) return_msg_addr;
-
-	// Release mouse warping
-	mouse.b.orig = zc.offset_u;
-	mouse.warp_if_move = 0;
-	return WAHE_HOST_CMD_HANDLED;
-}
-#endif
-
 static enum wahe_host_cmd_result wahe_hcmd_benchmark(wahe_module_t *ctx, const char **line, size_t *return_msg_addr)
 {
 	(void) ctx;
@@ -446,10 +420,6 @@ void wahe_register_host_commands(wahe_group_t *group)
 		{"Load raw file at path", wahe_hcmd_load_raw_file},
 		{"Save raw file to path", wahe_hcmd_save_raw_file},
 		{"Get raw time", wahe_hcmd_get_raw_time},
-		#ifdef H_ROUZICLIB
-		{"Mouse capture", wahe_hcmd_mouse_capture},
-		{"Mouse release", wahe_hcmd_mouse_release},
-		#endif
 		{"Benchmark", wahe_hcmd_benchmark},
 		{"Print", wahe_hcmd_print}
 	};

@@ -2,7 +2,7 @@
 #define WAHELIB_H
 
 #ifndef WAHE_STACK_BLANK_PATTERN
-  #define WAHE_STACK_BLANK_PATTERN 0xEE
+  #define WAHE_STACK_BLANK_PATTERN 0x01
 #endif
 
 #ifdef __cplusplus

@@ -1,8 +1,6 @@
 enum wahe_eo_type
 {
 	WAHE_EO_MODULE_FUNC,
-	WAHE_EO_IMAGE_DISPLAY,
-	WAHE_EO_KB_MOUSE,
 	WAHE_EO_CHAIN_INPUT_MSG
 };
 
@@ -67,9 +65,6 @@ struct wahe_module_t
 	rl_mutex_t mutex;
 	void *parent_group;	// wahe_group_t *
 	size_t runner_count;
-	#ifdef H_ROUZICLIB
-	textedit_t input_te;
-	#endif
 
 	uint8_t *memory_ptr;
 	size_t stack_base, data_end, heap_base, memory_size, memory_reserve_size, *memory_size_addr, *stack_ptr_addr, cita_time_addr;
@@ -94,15 +89,6 @@ struct wahe_module_t
 	void (*wasm_decomp_instance_destroy)(void *instance);
 	void *(*wasm_decomp_instance_global_address)(void *instance, size_t index);
 };
-
-#ifdef H_ROUZICLIB
-typedef struct
-{
-	raster_t fb;
-	rect_t fb_area, fb_rect;
-	int mouse_active, kb_active;
-} wahe_image_display_t;
-#endif
 
 typedef struct
 {
@@ -139,7 +125,7 @@ typedef struct
 typedef struct
 {
 	enum wahe_eo_type type;
-	int module_id, display_id;
+	int module_id;
 	enum wahe_func_id func_id;
 	size_t runner_id;
 	size_t dst_msg_addr, ret_msg_addr;
@@ -173,11 +159,6 @@ typedef struct
 	wahe_chain_t *chain;
 	size_t chain_count, chain_as;
 
-	#ifdef H_ROUZICLIB
-	wahe_image_display_t *image;
-	size_t image_count, image_as;
-	#endif
-
 	wahe_cmd_reg_t *cmd_reg;
 	size_t cmd_reg_count, cmd_reg_as;
 	int max_cmd_word_count, host_commands_registered;
@@ -205,11 +186,6 @@ extern size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t siz
 extern void call_module_free(wahe_module_t *ctx, size_t address);
 extern char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_id func_id, int call_from_eo);
 
-#ifdef H_ROUZICLIB
-extern int wahe_pixel_format_to_raster_mode(const char *name);
-extern int wahe_message_to_raster(wahe_module_t *ctx, size_t msg_addr, raster_t *r);
-#endif
-
 extern size_t module_vsprintf_alloc(wahe_module_t *ctx, const char *format, va_list args);
 extern size_t module_sprintf_alloc(wahe_module_t *ctx, const char* format, ...);
 extern char *wahe_send_input(wahe_module_t *ctx, const char *format, ...);
@@ -218,9 +194,6 @@ extern void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_
 extern void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr);
 extern size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module, size_t dst_runner_id);
 extern size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module);
-#ifdef H_ROUZICLIB
-extern void wahe_make_keyboard_mouse_messages(wahe_chain_t *chain, int module_id, int display_id, int conn_id);
-#endif
 
 extern char *wahe_run_command_with_id_native(wahe_module_t *ctx, char *message);
 #ifdef WAHE_WASMTIME
