@@ -16,6 +16,7 @@ enum wahe_func_id
 	WAHE_FUNC_DRAW,
 	WAHE_FUNC_PROC_IMAGE,
 	WAHE_FUNC_PROC_SOUND,
+	WAHE_FUNC_THREAD_ENTRY,
 
 	WAHE_FUNC_COUNT
 };
@@ -52,6 +53,10 @@ typedef struct
 	wasmtime_memory_t memory;
 	wasmtime_global_t stack_pointer;
 	wasmtime_func_t func[WAHE_FUNC_COUNT];
+	size_t thread_id, stack_alloc, stack_start, stack_size, tls_alloc, input_addr;
+	void *thread_handle;
+	char *thread_reply;
+	int creating, joining;
 } wahe_wasmtime_runner_t;
 #endif // WAHE_WASMTIME
 
@@ -76,7 +81,9 @@ struct wahe_module_t
 	wasm_engine_t *engine;
 	wasmtime_module_t *module;
 	wasmtime_sharedmemory_t *shared_memory;
-	wahe_wasmtime_runner_t *runner;
+	wahe_wasmtime_runner_t **runner;
+	size_t initial_runner_count, next_thread_id;
+	int thread_memory_safe, threads_stopping;
 	int memory_is_shared;
 	wasmtime_valkind_t address_type;
 	#endif // WAHE_WASMTIME
@@ -195,6 +202,8 @@ extern size_t module_sprintf_alloc(wahe_module_t *ctx, const char* format, ...);
 extern char *wahe_send_input(wahe_module_t *ctx, const char *format, ...);
 extern void wahe_register_host_commands(wahe_group_t *group);
 extern void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count);
+extern void wahe_module_join_threads(wahe_module_t *ctx);
+extern size_t wahe_get_module_memory_size(wahe_module_t *ctx);
 extern void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr);
 extern size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module, size_t dst_runner_id);
 extern size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module);

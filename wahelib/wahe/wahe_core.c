@@ -8,9 +8,11 @@
 	#include <memoryapi.h>
 	#include <sysinfoapi.h>
 	#include <synchapi.h>
+	#include <process.h>
 #else
 	#include <sys/mman.h>
 	#include <unistd.h>
+	#include <pthread.h>
 	#ifndef MAP_ANONYMOUS
 		#define MAP_ANONYMOUS MAP_ANON
 	#endif
@@ -61,7 +63,8 @@ const char *wahe_func_name[] =
 	"proc_cmd",
 	"draw",
 	"proc_image",
-	"proc_sound"
+	"proc_sound",
+	"thread_entry"
 };
 
 _Thread_local wahe_chain_t *wahe_cur_chain = NULL;
@@ -70,6 +73,7 @@ _Thread_local wahe_chain_t *wahe_cur_chain = NULL;
 static _Thread_local wahe_wasmtime_runner_t *wahe_cur_wasmtime_runner = NULL;
 static wasmtime_val_t wasmtime_val_set_address(wahe_module_t *ctx, size_t address);
 static size_t wasmtime_val_get_address(wasmtime_val_t val);
+static int wahe_init_thread_tls(wahe_module_t *ctx, wahe_wasmtime_runner_t *runner);
 #endif
 
 void wahe_bench_point(const char *label, int depth)
@@ -115,14 +119,22 @@ static wahe_wasmtime_runner_t *wahe_get_wasmtime_runner(wahe_module_t *ctx, size
 		return NULL;
 	}
 
-	// Reject runner indexes outside the module's runner array
-	if (ctx->runner == NULL || runner_id >= ctx->runner_count)
+	// Avoid registry locks when a worker accesses its own stable runner object
+	if (wahe_cur_wasmtime_runner && wahe_cur_wasmtime_runner->module == ctx &&
+		wahe_cur_wasmtime_runner->runner_id == runner_id)
+		return wahe_cur_wasmtime_runner;
+
+	// Read stable runner objects under the lock protecting the growable pointer array
+	rl_mutex_lock(&ctx->mutex);
+	wahe_wasmtime_runner_t *runner = runner_id < ctx->runner_count && ctx->runner ? ctx->runner[runner_id] : NULL;
+	if (runner && runner->thread_id && runner != wahe_cur_wasmtime_runner)
+		runner = NULL;
+	if (runner == NULL)
 	{
 		fprintf_rl(stderr, "Cannot %s with runner %zu in module %s, which has %zu runners\n", operation, runner_id, ctx->module_name, ctx->runner_count);
-		return NULL;
 	}
-
-	return &ctx->runner[runner_id];
+	rl_mutex_unlock(&ctx->mutex);
+	return runner;
 }
 
 static size_t wahe_active_runner_id(wahe_module_t *ctx)
@@ -285,7 +297,7 @@ static void wahe_refresh_module_memory_size(wahe_module_t *ctx)
 
 	// Serialize reporting and updating the common module size
 	rl_mutex_lock(&ctx->mutex);
-	if (current_size != ctx->memory_size)
+	if (current_size > ctx->memory_size)
 	{
 		fprintf_rl(stdout, "Memory of module #%d %s grew from %zu kB to %zu kB\n", ctx->module_id, ctx->module_name, ctx->memory_size >> 10, current_size >> 10);
 		ctx->memory_size = current_size;
@@ -294,6 +306,16 @@ static void wahe_refresh_module_memory_size(wahe_module_t *ctx)
 	#else
 	(void) ctx;
 	#endif
+}
+
+size_t wahe_get_module_memory_size(wahe_module_t *ctx)
+{
+	// Read shared memory's current extent without racing the cached growth-reporting field
+	#ifdef WAHE_WASMTIME
+	if (ctx && ctx->type == WAHE_MODULE_WASMTIME && ctx->shared_memory)
+		return wasmtime_sharedmemory_data_size(ctx->shared_memory);
+	#endif
+	return ctx ? ctx->memory_size : 0;
 }
 
 static int wahe_blank_module_stack(wahe_module_t *ctx)
@@ -403,7 +425,7 @@ void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_f
 		// Resolve the store-specific function handle in every runner
 		for (size_t runner_id = 0; runner_id < ctx->runner_count; runner_id++)
 		{
-			wahe_wasmtime_runner_t *runner = &ctx->runner[runner_id];
+			wahe_wasmtime_runner_t *runner = ctx->runner[runner_id];
 			wasmtime_extern_t func_ext;
 
 			// Get the function export from this runner's instance
@@ -447,6 +469,7 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 	wahe_get_module_func(ctx, "module_draw",          WAHE_FUNC_DRAW, 1);
 	wahe_get_module_func(ctx, "module_proc_image",    WAHE_FUNC_PROC_IMAGE, 1);
 	wahe_get_module_func(ctx, "module_proc_sound",    WAHE_FUNC_PROC_SOUND, 1);
+	wahe_get_module_func(ctx, "module_thread_entry",  WAHE_FUNC_THREAD_ENTRY, 1);
 
 	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 	{
@@ -624,8 +647,16 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 	}
 
 	// Update CIT Alloc timestamp if present
+	// Publish allocator timestamps atomically when multiple runners share memory
 	if (ctx->cita_time_addr)
-		*(int32_t*) &ctx->memory_ptr[ctx->cita_time_addr] = get_time_hr() * 100.;
+	{
+		int32_t timestamp = get_time_hr() * 100.;
+		#ifdef _WIN32
+		InterlockedExchange((volatile LONG *) &ctx->memory_ptr[ctx->cita_time_addr], timestamp);
+		#else
+		__atomic_store_n((int32_t *) &ctx->memory_ptr[ctx->cita_time_addr], timestamp, __ATOMIC_RELAXED);
+		#endif
+	}
 
 	// Reject module types that cannot use Wasmtime dispatch
 	if (ctx->type != WAHE_MODULE_WASMTIME)
@@ -795,11 +826,12 @@ char *call_module_func_on_runner(wahe_module_t *ctx, size_t runner_id, size_t me
 
 	// Reject return addresses outside a Wasm module's active linear memory
 	wahe_refresh_module_memory_size(ctx);
+	size_t memory_size = wahe_get_module_memory_size(ctx);
 	if ((ctx->type != WAHE_MODULE_WASMTIME && ctx->type != WAHE_MODULE_WASM_TO_NATIVE) ||
-		ctx->memory_ptr == NULL || *ret_msg_addr >= ctx->memory_size)
+		ctx->memory_ptr == NULL || *ret_msg_addr >= memory_size)
 	{
 		fprintf_rl(stderr, "Module %s returned invalid message address %#zx for its %zu-byte active memory\n",
-			ctx->module_name, *ret_msg_addr, ctx->memory_size);
+			ctx->module_name, *ret_msg_addr, memory_size);
 		*ret_msg_addr = 0;
 		return NULL;
 	}
@@ -1040,13 +1072,27 @@ static int wahe_set_wasmtime_runner_stack(wahe_module_t *ctx, wahe_wasmtime_runn
 		stack_export.kind != WASMTIME_EXTERN_GLOBAL)
 	{
 		// Keep legacy single-runner modules that do not export their stack pointer
-		if (ctx->runner_count == 1)
+		if (ctx->initial_runner_count == 1 && !runner->thread_id)
 			return 1;
 
 		fprintf_rl(stderr, "Module %s runner %zu does not export a mutable __stack_pointer global\n", ctx->module_name, runner->runner_id);
 		return 0;
 	}
 	runner->stack_pointer = stack_export.of.global;
+
+	// Assign dynamically allocated stacks without changing any existing runner's stack
+	if (runner->thread_id)
+	{
+		wasmtime_val_t value = wasmtime_val_set_address(ctx, runner->stack_start + runner->stack_size);
+		wasmtime_error_t *error = wasmtime_global_set(runner->context, &runner->stack_pointer, &value);
+		if (error)
+		{
+			// Report globals that cannot be used as mutable stack pointers
+			fprint_wasmtime_error(ctx, runner, error, NULL);
+			return 0;
+		}
+		return 1;
+	}
 
 	// Read the linked stack top from this instance before assigning its slice
 	wasmtime_val_t linked_stack_pointer;
@@ -1061,7 +1107,7 @@ static int wahe_set_wasmtime_runner_stack(wahe_module_t *ctx, wahe_wasmtime_runn
 	}
 
 	// Preserve the linked stack pointer for a single runner
-	if (ctx->runner_count == 1)
+	if (ctx->initial_runner_count == 1)
 		return 1;
 
 	// Require stack-first layout so slicing does not overlap module data
@@ -1073,12 +1119,12 @@ static int wahe_set_wasmtime_runner_stack(wahe_module_t *ctx, wahe_wasmtime_runn
 	}
 
 	// Validate that the linker-reserved stack can be split equally and aligned
-	if (ctx->stack_base == 0 || ctx->stack_base % ctx->runner_count != 0)
+	if (ctx->stack_base == 0 || ctx->stack_base % ctx->initial_runner_count != 0)
 	{
 		fprintf_rl(stderr, "Module %s stack region %#zx cannot be split between %zu runners\n", ctx->module_name, ctx->stack_base, ctx->runner_count);
 		return 0;
 	}
-	size_t stack_size = ctx->stack_base / ctx->runner_count;
+	size_t stack_size = ctx->stack_base / ctx->initial_runner_count;
 	if (stack_size < 16 || stack_size % 16 != 0)
 	{
 		fprintf_rl(stderr, "Module %s runner stack size %#zx is not a positive multiple of 16 bytes\n", ctx->module_name, stack_size);
@@ -1100,13 +1146,13 @@ static int wahe_set_wasmtime_runner_stack(wahe_module_t *ctx, wahe_wasmtime_runn
 	return 1;
 }
 
-static int wahe_init_wasmtime_runner(wahe_module_t *ctx, size_t runner_id)
+static int wahe_init_wasmtime_runner(wahe_module_t *ctx, wahe_wasmtime_runner_t *runner)
 {
 	// Initialize the runner identity and its recursive store lock
-	wahe_wasmtime_runner_t *runner = &ctx->runner[runner_id];
+	size_t runner_id = runner->runner_id;
 	runner->module = ctx;
-	runner->runner_id = runner_id;
-	rl_mutex_init(&runner->mutex);
+	if (!runner->thread_id)
+		rl_mutex_init(&runner->mutex);
 
 	// Create a separate store so this runner can execute concurrently
 	runner->store = wasmtime_store_new(ctx->engine, runner, NULL);
@@ -1217,6 +1263,10 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	ctx->parent_group = parent_group;
 	ctx->module_id = module_index;
 	ctx->runner_count = runner_count ? runner_count : 1;
+	#ifdef WAHE_WASMTIME
+	ctx->initial_runner_count = ctx->runner_count;
+	ctx->next_thread_id = 1;
+	#endif
 
 	// WASM module
 	if (check_if_file_is_wasm(path))
@@ -1238,6 +1288,8 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		io_override_set_buffer();
 		ctx->stack_base = wasmbin_read_stack_pointer((FILE *) &wasm_buf);
 		int memory_found = wasmbin_read_memory_info((FILE *) &wasm_buf, &memory_info);
+		ctx->thread_memory_safe = memory_found && memory_info.imported && memory_info.shared &&
+			memory_info.maximum_present && wasmbin_has_only_passive_data((FILE *) &wasm_buf);
 		io_override_set_FILE();
 		if (!memory_found)
 		{
@@ -1252,9 +1304,9 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		ctx->address_type = memory_info.memory64 ? WASMTIME_I64 : WASMTIME_I32;
 
 		// Require an imported shared memory when multiple instances must share it
-		if (ctx->runner_count > 1 && (!memory_info.imported || !memory_info.shared || !memory_info.maximum_present))
+		if (ctx->runner_count > 1 && !ctx->thread_memory_safe)
 		{
-			fprintf_rl(stderr, "Module %s requests %zu runners but its memory is not an imported shared memory with a maximum\n", ctx->module_name, ctx->runner_count);
+			fprintf_rl(stderr, "Module %s requests %zu runners but requires imported shared memory with a maximum and passive data segments\n", ctx->module_name, ctx->runner_count);
 			free_buf(&wasm_buf);
 			return;
 		}
@@ -1324,8 +1376,15 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 			return;
 		}
 		for (size_t runner_id = 0; runner_id < ctx->runner_count; runner_id++)
-			if (!wahe_init_wasmtime_runner(ctx, runner_id))
+		{
+			// Keep each runner's address stable even when the pointer array grows later
+			ctx->runner[runner_id] = calloc(1, sizeof(*ctx->runner[runner_id]));
+			if (!ctx->runner[runner_id])
 				return;
+			ctx->runner[runner_id]->runner_id = runner_id;
+			if (!wahe_init_wasmtime_runner(ctx, ctx->runner[runner_id]))
+				return;
+		}
 
 		// Find every instance's store-specific function handles
 		wahe_init_all_module_symbols(ctx);
@@ -1336,6 +1395,19 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		{
 			ctx->valid = 0;
 			return;
+		}
+
+		// Initialize exported TLS for additional configured runners before their first C calls
+		for (size_t i = 1; i < ctx->initial_runner_count; i++)
+		{
+			wasmtime_extern_t tls_export;
+			if (wasmtime_linker_get(ctx->runner[i]->linker, ctx->runner[i]->context, "", 0, "__tls_size", 10, &tls_export) &&
+				!wahe_init_thread_tls(ctx, ctx->runner[i]))
+			{
+				// Reject modules whose configured runners cannot receive independent TLS
+				ctx->valid = 0;
+				return;
+			}
 		}
 
 		// Print details
@@ -1427,18 +1499,19 @@ void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size
 	// Synchronize Wasmtime sizes before validating module-relative ranges
 	wahe_refresh_module_memory_size(src_module);
 	wahe_refresh_module_memory_size(dst_module);
+	size_t src_size = wahe_get_module_memory_size(src_module), dst_size = wahe_get_module_memory_size(dst_module);
 
 	// Reject source ranges outside the module's active memory
-	if (src_module && (src_module->memory_ptr == NULL || src_addr > src_module->memory_size || copy_size > src_module->memory_size - src_addr))
+	if (src_module && (src_module->memory_ptr == NULL || src_addr > src_size || copy_size > src_size - src_addr))
 	{
-		fprintf_rl(stderr, "Cannot copy %zu bytes from offset %#zx in module %s with a %zu-byte active memory\n", copy_size, src_addr, src_module->module_name, src_module->memory_size);
+		fprintf_rl(stderr, "Cannot copy %zu bytes from offset %#zx in module %s with a %zu-byte active memory\n", copy_size, src_addr, src_module->module_name, src_size);
 		return;
 	}
 
 	// Reject destination ranges outside the module's active memory
-	if (dst_module && (dst_module->memory_ptr == NULL || dst_addr > dst_module->memory_size || copy_size > dst_module->memory_size - dst_addr))
+	if (dst_module && (dst_module->memory_ptr == NULL || dst_addr > dst_size || copy_size > dst_size - dst_addr))
 	{
-		fprintf_rl(stderr, "Cannot copy %zu bytes to offset %#zx in module %s with a %zu-byte active memory\n", copy_size, dst_addr, dst_module->module_name, dst_module->memory_size);
+		fprintf_rl(stderr, "Cannot copy %zu bytes to offset %#zx in module %s with a %zu-byte active memory\n", copy_size, dst_addr, dst_module->module_name, dst_size);
 		return;
 	}
 
@@ -1482,12 +1555,13 @@ static int wahe_measure_transfer_message(wahe_module_t *src_module, const char *
 	if (src_module && src_module->memory_ptr && src_module->type != WAHE_MODULE_NATIVE)
 	{
 		wahe_refresh_module_memory_size(src_module);
+		size_t memory_size = wahe_get_module_memory_size(src_module);
 		uintptr_t memory_start = (uintptr_t) src_module->memory_ptr;
 		uintptr_t message_start = (uintptr_t) src_message;
-		if (src_module->memory_size <= UINTPTR_MAX - memory_start &&
-			message_start >= memory_start && message_start < memory_start + src_module->memory_size)
+		if (memory_size <= UINTPTR_MAX - memory_start &&
+			message_start >= memory_start && message_start < memory_start + memory_size)
 		{
-			size_t remaining_size = src_module->memory_size - (message_start - memory_start);
+			size_t remaining_size = memory_size - (message_start - memory_start);
 			const char *message_end = memchr(src_message, '\0', remaining_size);
 			if (message_end == NULL)
 			{
@@ -1503,7 +1577,7 @@ static int wahe_measure_transfer_message(wahe_module_t *src_module, const char *
 		if (!src_module->has_host_mem_access)
 		{
 			fprintf_rl(stderr, "Cannot transfer message pointer %p outside module %s's %zu-byte active memory\n",
-				(const void *) src_message, src_module->module_name, src_module->memory_size);
+				(const void *) src_message, src_module->module_name, memory_size);
 			return 0;
 		}
 	}
@@ -1547,7 +1621,8 @@ static int wahe_resolve_transfer_source(wahe_module_t *src_module, size_t src_ad
 
 	// Accept ranges contained in the source module's active linear memory
 	wahe_refresh_module_memory_size(src_module);
-	if (src_module->memory_ptr && src_addr <= src_module->memory_size && copy_size <= src_module->memory_size - src_addr)
+	size_t memory_size = wahe_get_module_memory_size(src_module);
+	if (src_module->memory_ptr && src_addr <= memory_size && copy_size <= memory_size - src_addr)
 	{
 		*src_ptr = &src_module->memory_ptr[src_addr];
 		*is_module_offset = 1;
@@ -1571,7 +1646,7 @@ static int wahe_resolve_transfer_source(wahe_module_t *src_module, size_t src_ad
 
 	// Report locations outside the address space available to the source module
 	fprintf_rl(stderr, "Cannot transfer %zu bytes at address %#zx from module %s with a %zu-byte active memory\n",
-		copy_size, src_addr, src_module->module_name, src_module->memory_size);
+		copy_size, src_addr, src_module->module_name, memory_size);
 	return 0;
 }
 
@@ -1595,9 +1670,10 @@ static int wahe_prepare_transfer_location(wahe_module_t *src_module, wahe_module
 
 	// Preserve offsets that already refer to the destination's linear memory
 	wahe_refresh_module_memory_size(dst_module);
+	size_t memory_size = wahe_get_module_memory_size(dst_module);
 	if (is_module_offset && src_module && src_module->memory_ptr == dst_module->memory_ptr &&
-		location->src_addr <= dst_module->memory_size &&
-		location->copy_size <= dst_module->memory_size - location->src_addr)
+		location->src_addr <= memory_size &&
+		location->copy_size <= memory_size - location->src_addr)
 	{
 		location->dst_addr = location->src_addr;
 		return 1;
@@ -1808,11 +1884,12 @@ size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, co
 	else
 	{
 		wahe_refresh_module_memory_size(dst_module);
-		if (dst_module->memory_ptr == NULL || dst_message_addr > dst_module->memory_size ||
-			allocation_size > dst_module->memory_size - dst_message_addr)
+		size_t memory_size = wahe_get_module_memory_size(dst_module);
+		if (dst_module->memory_ptr == NULL || dst_message_addr > memory_size ||
+			allocation_size > memory_size - dst_message_addr)
 		{
 			fprintf_rl(stderr, "Module %s allocated an invalid %zu-byte message block at offset %#zx in its %zu-byte memory\n",
-				dst_module->module_name, allocation_size, dst_message_addr, dst_module->memory_size);
+				dst_module->module_name, allocation_size, dst_message_addr, memory_size);
 			call_module_free_on_runner(dst_module, dst_runner_id, dst_message_addr);
 			free(location);
 			return 0;

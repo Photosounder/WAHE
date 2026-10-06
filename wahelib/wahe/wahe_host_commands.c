@@ -290,7 +290,7 @@ static enum wahe_host_cmd_result wahe_hcmd_get_memory_size(wahe_module_t *ctx, c
 		return WAHE_HOST_CMD_NOT_HANDLED;
 
 	// Return the active module memory size
-	*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ctx->memory_size);
+	*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", wahe_get_module_memory_size(ctx));
 	return WAHE_HOST_CMD_HANDLED;
 }
 
@@ -427,6 +427,90 @@ static enum wahe_host_cmd_result wahe_hcmd_change_command_registration(wahe_modu
 	return WAHE_HOST_CMD_HANDLED;
 }
 
+static enum wahe_host_cmd_result wahe_hcmd_thread_create(wahe_module_t *ctx, const char **line, size_t *return_msg_addr)
+{
+	// Parse the requested stack size and its explicit unit from the first line
+	double amount = 0.;
+	char unit[8] = {0};
+	int end = 0;
+	sscanf(*line, "Create thread with %lg %7s stack%n", &amount, unit, &end);
+	const char *failure = "expected Create thread with <size> <unit> stack followed by an optional entry message";
+	size_t id = 0;
+	if (end && wahe_hcmd_ends_at(*line, end))
+	{
+		// Convert the supported units using binary multiples for stack sizes
+		size_t unit_size = 0;
+		if (!strcmp(unit, "kB"))
+			unit_size = 1024;
+		else if (!strcmp(unit, "MB"))
+			unit_size = 1024 * 1024;
+		else if (!strcmp(unit, "B") || !strcmp(unit, "bytes"))
+			unit_size = 1;
+		failure = "stack size unit must be kB, MB, B or bytes";
+		if (unit_size)
+		{
+			// Reject nonfinite, fractional-byte and overflowing sizes before conversion
+			double bytes = amount * unit_size;
+			failure = "stack size must be positive and representable in whole bytes";
+			if (isfinite(bytes) && bytes > 0. && bytes < (double) SIZE_MAX && bytes == floor(bytes))
+			{
+				// Pass the remaining text verbatim to the new worker
+				#ifdef WAHE_WASMTIME
+				const char *message = *line + end;
+				if (*message == '\n')
+					message++;
+				id = wahe_create_module_thread(ctx, (size_t) bytes, message, &failure);
+				#else
+				failure = "host was built without Wasmtime support";
+				#endif
+			}
+		}
+	}
+	*return_msg_addr = id ? module_sprintf_alloc(ctx, "Thread created %zu\n", id) :
+		module_sprintf_alloc(ctx, "Thread error %s\n", failure);
+	return WAHE_HOST_CMD_RETURN;
+}
+
+static enum wahe_host_cmd_result wahe_hcmd_thread_join(wahe_module_t *ctx, const char **line, size_t *return_msg_addr)
+{
+	// Join a handle belonging to the calling module and include its optional entry reply
+	size_t id = 0;
+	int end = 0, joined = 0;
+	char *reply = NULL;
+	const char *failure = "expected Join thread ID <id>";
+	sscanf(*line, "Join thread ID %zu%n", &id, &end);
+	if (end && wahe_hcmd_ends_at(*line, end))
+	{
+		// Reject native callers without attempting to access a Wasmtime runner registry
+		#ifdef WAHE_WASMTIME
+		if (ctx->type == WAHE_MODULE_WASMTIME)
+			joined = wahe_join_module_thread(ctx, id, &reply, &failure);
+		else
+			failure = "only Wasmtime modules can create threads";
+		#else
+		failure = "host was built without Wasmtime support";
+		#endif
+	}
+	*return_msg_addr = joined ? module_sprintf_alloc(ctx, "Thread joined %zu\n%s", id, reply ? reply : "") :
+		module_sprintf_alloc(ctx, "Thread error %s\n", failure);
+	free(reply);
+	return WAHE_HOST_CMD_RETURN;
+}
+
+static enum wahe_host_cmd_result wahe_hcmd_get_thread_id(wahe_module_t *ctx, const char **line, size_t *return_msg_addr)
+{
+	// Distinguish dynamically created workers from the module's original runners
+	if (!wahe_hcmd_ends_at(*line, sizeof("Get thread ID")-1))
+		return WAHE_HOST_CMD_NOT_HANDLED;
+	size_t id = 0;
+	#ifdef WAHE_WASMTIME
+	if (wahe_cur_wasmtime_runner && wahe_cur_wasmtime_runner->module == ctx)
+		id = wahe_cur_wasmtime_runner->thread_id;
+	#endif
+	*return_msg_addr = module_sprintf_alloc(ctx, "Thread ID %zu\n", id);
+	return WAHE_HOST_CMD_RETURN;
+}
+
 void wahe_register_host_commands(wahe_group_t *group)
 {
 	// Avoid duplicating host registrations when several WAHE files extend one group
@@ -446,6 +530,9 @@ void wahe_register_host_commands(wahe_group_t *group)
 		{"Enlarge memory to", wahe_hcmd_enlarge_memory},
 		{"Shrink memory to", wahe_hcmd_shrink_memory},
 		{"Run chain", wahe_hcmd_run_chain},
+		{"Create thread with", wahe_hcmd_thread_create},
+		{"Join thread ID", wahe_hcmd_thread_join},
+		{"Get thread ID", wahe_hcmd_get_thread_id},
 		{"Copy", wahe_hcmd_copy},
 		{"Get memory address", wahe_hcmd_get_memory_address},
 		{"Get heap base", wahe_hcmd_get_heap_base},

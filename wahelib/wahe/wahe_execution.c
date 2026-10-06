@@ -64,11 +64,12 @@ char *wahe_execute_chain_from_module(wahe_chain_t *chain, const char *input_msg,
 							else if (src_module->type == WAHE_MODULE_WASMTIME || src_module->type == WAHE_MODULE_WASM_TO_NATIVE)
 							{
 								// Reject stale or malformed return offsets before forming a host pointer
-								if (src_module->memory_ptr && src_addr < src_module->memory_size)
+								size_t memory_size = wahe_get_module_memory_size(src_module);
+								if (src_module->memory_ptr && src_addr < memory_size)
 									src_message = (const char *) &src_module->memory_ptr[src_addr];
 								else
 									fprintf_rl(stderr, "Cannot read return message offset %#zx from module %s with a %zu-byte active memory\n",
-										src_addr, src_module->module_name, src_module->memory_size);
+										src_addr, src_module->module_name, memory_size);
 							}
 							else
 								fprintf_rl(stderr, "Cannot read a return message from module %s with invalid module type %d\n", src_module->module_name, src_module->type);

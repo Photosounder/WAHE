@@ -167,3 +167,20 @@ void wasmbin_read_memory_size(FILE *file, uint32_t *base_pages, uint32_t *max_pa
 	*base_pages = info.base_pages;
 	*max_pages = info.max_pages;
 }
+
+int wasmbin_has_only_passive_data(FILE *file)
+{
+	// Reject active segments which would overwrite live shared memory on instantiation
+	if (!wasmbin_jump_to_section(file, 11))
+		return 1;
+	size_t count = (size_t) fread_LEB128(file, 0);
+	for (size_t i = 0; i < count; i++)
+	{
+		// Skip only passive segments after checking their mode
+		if (fread_LEB128(file, 0) != 1)
+			return 0;
+		size_t size = (size_t) fread_LEB128(file, 0);
+		fseek_override(file, size, SEEK_CUR);
+	}
+	return 1;
+}
