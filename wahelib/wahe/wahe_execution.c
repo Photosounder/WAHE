@@ -1,5 +1,7 @@
 char *wahe_execute_chain_from_module(wahe_chain_t *chain, const char *input_msg, wahe_module_t *input_src_module)
 {
+	// Prevent new chains from running after a process-wide module failure
+	wahe_wait_after_execution_failure();
 	// Preserve the caller's chain across nested execution
 	wahe_chain_t *previous_chain = wahe_cur_chain;
 
@@ -18,6 +20,8 @@ char *wahe_execute_chain_from_module(wahe_chain_t *chain, const char *input_msg,
 	// Execute all orders
 	for (int ie=0; ie < chain->exec_order_count; ie++)
 	{
+		// Stop active chains before dispatching their next execution order
+		wahe_wait_after_execution_failure();
 		wahe_exec_order_t *eo = &chain->exec_order[ie];
 		wahe_connection_t *conn = NULL;
 

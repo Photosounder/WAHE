@@ -114,6 +114,8 @@ typedef struct
 {
 	uint64_t hash;
 	int word_count;
+	uint64_t sequence;
+	int runtime;
 	enum wahe_cmd_target_type target_type;
 	union
 	{
@@ -161,6 +163,8 @@ typedef struct
 
 	wahe_cmd_reg_t *cmd_reg;
 	size_t cmd_reg_count, cmd_reg_as;
+	rl_mutex_t cmd_reg_mutex;
+	uint64_t cmd_reg_sequence;
 	int max_cmd_word_count, host_commands_registered;
 
 	uint8_t *cita_index;

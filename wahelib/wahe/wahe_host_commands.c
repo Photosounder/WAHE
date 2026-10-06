@@ -390,12 +390,50 @@ static enum wahe_host_cmd_result wahe_hcmd_print(wahe_module_t *ctx, const char 
 	return WAHE_HOST_CMD_RETURN;
 }
 
+static enum wahe_host_cmd_result wahe_hcmd_change_command_registration(wahe_module_t *ctx,
+	const char **line, size_t *return_msg_addr)
+{
+	// Parse one command prefix on this line and distinguish registration from removal
+	const char *command = NULL;
+	int add = 0;
+	if (strncmp(*line, "Register command ", sizeof("Register command ")-1) == 0)
+	{
+		command = *line + sizeof("Register command ")-1;
+		add = 1;
+	}
+	else if (strncmp(*line, "Unregister command ", sizeof("Unregister command ")-1) == 0)
+		command = *line + sizeof("Unregister command ")-1;
+	else
+		return WAHE_HOST_CMD_NOT_HANDLED;
+
+	// Trim surrounding spaces and respect the router's sixteen-word prefix limit
+	while (*command == ' ')
+		command++;
+	size_t length = strcspn(command, "\n");
+	while (length && command[length-1] == ' ')
+		length--;
+	char *name = make_string_copy_len(command, length);
+	int words = string_count_fields(name, " ");
+	if (!length || words < 1 || words > 16)
+	{
+		free(name);
+		*return_msg_addr = module_sprintf_alloc(ctx, "Command prefix must contain between 1 and 16 words");
+		return WAHE_HOST_CMD_RETURN;
+	}
+
+	// Change only the issuing module's runtime registrations and retain all earlier routes
+	wahe_change_runtime_command(ctx, name, add);
+	free(name);
+	return WAHE_HOST_CMD_HANDLED;
+}
+
 void wahe_register_host_commands(wahe_group_t *group)
 {
 	// Avoid duplicating host registrations when several WAHE files extend one group
 	if (group->host_commands_registered)
 		return;
 	group->host_commands_registered = 1;
+	rl_mutex_init(&group->cmd_reg_mutex);
 
 	// Register fixed host commands before modules so later module registrations retain precedence
 	static const struct
@@ -421,14 +459,18 @@ void wahe_register_host_commands(wahe_group_t *group)
 		{"Save raw file to path", wahe_hcmd_save_raw_file},
 		{"Get raw time", wahe_hcmd_get_raw_time},
 		{"Benchmark", wahe_hcmd_benchmark},
-		{"Print", wahe_hcmd_print}
+		{"Print", wahe_hcmd_print},
+		{"Register command", wahe_hcmd_change_command_registration},
+		{"Unregister command", wahe_hcmd_change_command_registration}
 	};
 
 	// Add each host handler to the shared command registry
+	rl_mutex_lock(&group->cmd_reg_mutex);
 	for (size_t i=0; i < sizeof(command)/sizeof(*command); i++)
 	{
 		wahe_cmd_reg_t *reg = wahe_add_command_registration(group, command[i].command);
 		reg->target_type = WAHE_CMD_TARGET_HOST;
 		reg->host_func = command[i].func;
 	}
+	rl_mutex_unlock(&group->cmd_reg_mutex);
 }

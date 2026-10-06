@@ -1,9 +1,13 @@
 #include <errno.h>
 #include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
+	#include <debugapi.h>
 	#include <memoryapi.h>
 	#include <sysinfoapi.h>
+	#include <synchapi.h>
 #else
 	#include <sys/mman.h>
 	#include <unistd.h>
@@ -11,6 +15,34 @@
 		#define MAP_ANONYMOUS MAP_ANON
 	#endif
 #endif
+
+#ifdef _WIN32
+static volatile LONG wahe_execution_failed;
+#else
+static int wahe_execution_failed;
+#endif
+
+static int wahe_claim_execution_failure(void)
+{
+	// Elect one reporting thread before any failure diagnostics are printed
+	#ifdef _WIN32
+	return InterlockedExchange(&wahe_execution_failed, 1) == 0;
+	#else
+	return __atomic_exchange_n(&wahe_execution_failed, 1, __ATOMIC_SEQ_CST) == 0;
+	#endif
+}
+
+static void wahe_wait_after_execution_failure(void)
+{
+	// Park other execution threads until the reporting thread exits the process
+	#ifdef _WIN32
+	while (InterlockedCompareExchange(&wahe_execution_failed, 0, 0))
+		Sleep(100);
+	#else
+	while (__atomic_load_n(&wahe_execution_failed, __ATOMIC_SEQ_CST))
+		usleep(100000);
+	#endif
+}
 
 const char *wahe_eo_name[] =
 {
@@ -494,6 +526,9 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 {
 	size_t ret_val;
 
+	// Prevent further module calls while a fatal failure is being inspected
+	wahe_wait_after_execution_failure();
+
 	// Reject invalid call metadata
 	if (ctx == NULL)
 	{
@@ -633,8 +668,12 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 	// Enter only this runner while allowing other runners to execute in parallel
 	wahe_wasmtime_runner_t *prev_runner = wahe_cur_wasmtime_runner;
 	rl_mutex_lock(&runner->mutex);
+	// Recheck after waiting for another call on the same runner
+	wahe_wait_after_execution_failure();
 	wahe_cur_wasmtime_runner = runner;
 	error = wasmtime_func_call(runner->context, &runner->func[func_id], param, arg_count, ret, func_id != WAHE_FUNC_FREE, &trap);
+	// Publish failure before another waiting call can enter this runner
+	int first_failure = (error || trap) ? wahe_claim_execution_failure() : 0;
 	wahe_cur_wasmtime_runner = prev_runner;
 	rl_mutex_unlock(&runner->mutex);
 
@@ -643,16 +682,48 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 		chain->current_func = prev_func;
 	wahe_bench_point("function returned", -1);
 
-	// Synchronize memory growth performed during the module call
-	wahe_refresh_module_memory_size(ctx);
-
 	if (error || trap)
 	{
+		// Stop other chains and let only the first failing thread report diagnostics
+		if (!first_failure)
+			wahe_wait_after_execution_failure();
 		fprintf_rl(stderr, "Calling %s runner %zu:%s() failed\n", ctx->module_name, runner_id, wahe_func_name[func_id]);
 		fprint_wasmtime_error(ctx, runner, error, trap);
 		ctx->valid = 0;
-		return 0;
+		// Preserve the first failure report before halting the execution chain
+		fflush(stdout);
+		fflush(stderr);
+		#ifdef _WIN32
+		if (IsDebuggerPresent())
+			DebugBreak();
+		else
+		{
+			// Keep an interactive console open until the failure has been inspected
+			DWORD console_mode;
+			if (GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &console_mode))
+			{
+				fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
+				fflush(stderr);
+				int character;
+				do character = getchar(); while (character != '\n' && character != EOF);
+			}
+		}
+		#else
+		// Keep an interactive terminal open until the failure has been inspected
+		if (isatty(STDIN_FILENO))
+		{
+			fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
+			fflush(stderr);
+			int character;
+			do character = getchar(); while (character != '\n' && character != EOF);
+		}
+		#endif
+		_Exit(EXIT_FAILURE);
 	}
+
+	// Park successful in-flight calls before they continue into message handling
+	wahe_wait_after_execution_failure();
+	wahe_refresh_module_memory_size(ctx);
 
 	// Check result type
 	if (func_id != WAHE_FUNC_FREE)
@@ -858,6 +929,8 @@ static wahe_cmd_reg_t *wahe_add_command_registration(wahe_group_t *group, const 
 	// Allocate and initialise the common registration fields
 	alloc_enough(&group->cmd_reg, group->cmd_reg_count+=1, &group->cmd_reg_as, sizeof(wahe_cmd_reg_t), 1.2);
 	wahe_cmd_reg_t *reg = &group->cmd_reg[group->cmd_reg_count-1];
+	memset(reg, 0, sizeof(*reg));
+	reg->sequence = ++group->cmd_reg_sequence;
 	reg->hash = get_string_hash(command);
 	reg->word_count = string_count_fields(command, " ");
 	group->max_cmd_word_count = MAXN(group->max_cmd_word_count, reg->word_count);
@@ -872,6 +945,9 @@ void wahe_register_commands(wahe_module_t *ctx, char *list)
 
 	fprintf_rl(stdout, "Registering commands for module %s:\n%s\n", ctx->module_name, list);
 
+	// Serialize startup registrations with command lookups and runtime changes
+	wahe_register_host_commands(group);
+	rl_mutex_lock(&group->cmd_reg_mutex);
 	for (il = 0; il < linecount; il++)
 	{
 		// Blindly add command to register, even if it's already been registered
@@ -880,7 +956,79 @@ void wahe_register_commands(wahe_module_t *ctx, char *list)
 		reg->module_id = ctx->module_id;
 	}
 
+	rl_mutex_unlock(&group->cmd_reg_mutex);
 	free_2d(array, 1);
+}
+
+static void wahe_change_runtime_command(wahe_module_t *ctx, const char *command, int add)
+{
+	// Push a caller-owned override or remove its newest matching runtime registration
+	wahe_group_t *group = ctx->parent_group;
+	uint64_t hash = get_string_hash(command);
+	int words = string_count_fields(command, " ");
+	rl_mutex_lock(&group->cmd_reg_mutex);
+	if (add)
+	{
+		wahe_cmd_reg_t *reg = wahe_add_command_registration(group, command);
+		reg->target_type = WAHE_CMD_TARGET_MODULE;
+		reg->module_id = ctx->module_id;
+		reg->runtime = 1;
+	}
+	else
+	{
+		// Leave registrations owned by other modules and startup registrations untouched
+		for (size_t i = group->cmd_reg_count; i > 0; i--)
+		{
+			wahe_cmd_reg_t *reg = &group->cmd_reg[i-1];
+			if (reg->runtime && reg->target_type == WAHE_CMD_TARGET_MODULE &&
+				reg->module_id == ctx->module_id && reg->hash == hash && reg->word_count == words)
+			{
+				memmove(reg, reg + 1, (group->cmd_reg_count - i) * sizeof(*reg));
+				group->cmd_reg_count--;
+				break;
+			}
+		}
+	}
+	rl_mutex_unlock(&group->cmd_reg_mutex);
+}
+
+static int wahe_find_command_registration(wahe_group_t *group, const char *line,
+	int caller_module_id, uint64_t *before, wahe_cmd_reg_t *match)
+{
+	// Match command prefixes under the registry lock and copy the target before invoking it
+	uint64_t msg_hash[16] = {0};
+	const char *p = line, *line_end = strchr(line, '\n');
+	if (!line_end)
+		line_end = line + strlen(line);
+	rl_mutex_lock(&group->cmd_reg_mutex);
+	for (int i = 0; i < MINN(group->max_cmd_word_count, 16) && p < line_end; i++)
+	{
+		p = strchr(p, ' ');
+		if (!p || p > line_end)
+			p = line_end;
+		msg_hash[i] = get_buffer_hash(line, p - line);
+		if (p < line_end)
+			p++;
+	}
+
+	// Use stable sequence numbers so concurrent removals cannot invalidate fallback traversal
+	int found = 0;
+	for (size_t i = group->cmd_reg_count; i > 0; i--)
+	{
+		wahe_cmd_reg_t *reg = &group->cmd_reg[i-1];
+		if (reg->sequence >= *before || reg->word_count < 1 || reg->word_count > 16 ||
+			(reg->target_type == WAHE_CMD_TARGET_MODULE && reg->module_id == caller_module_id))
+			continue;
+		if (reg->hash == msg_hash[reg->word_count-1])
+		{
+			*match = *reg;
+			*before = reg->sequence;
+			found = 1;
+			break;
+		}
+	}
+	rl_mutex_unlock(&group->cmd_reg_mutex);
+	return found;
 }
 
 #ifdef WAHE_WASMTIME
@@ -1480,6 +1628,8 @@ static int wahe_prepare_transfer_location(wahe_module_t *src_module, wahe_module
 
 size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module, size_t dst_runner_id)
 {
+	// Stop transfers before they can print secondary invalid-module errors
+	wahe_wait_after_execution_failure();
 	enum { payload_alignment = 16 };
 	const size_t max_address_len = 2 + sizeof(size_t) * 3;
 	const char location_prefix[] = "location: ";
@@ -1874,60 +2024,41 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 		}
 
 		//** Run registered commands **
-		uint64_t msg_hash[16] = {0};
-		const char *p = line, *line_end = strstr(line, "\n");
-		if (line_end == NULL)
-			line_end = &line[strlen(line)];
-
-		// Make hashes for all word counts
-		for (int i=0; i < group->max_cmd_word_count && p < line_end; i++)
+		uint64_t before = UINT64_MAX;
+		wahe_cmd_reg_t registration;
+		while (wahe_find_command_registration(group, line, ctx->module_id, &before, &registration))
 		{
-			p = strstr(p, " ");
-			if (p == NULL || p > line_end)
-				p = line_end;
+			wahe_cmd_reg_t *reg = &registration;
 
-			msg_hash[i] = get_buffer_hash(line, p - line);
-			p = &p[1];
-		}
-
-		// Go through every registered command to find a match
-		for (int i = group->cmd_reg_count-1; i >= 0; i--)
-			if (group->cmd_reg[i].hash == msg_hash[group->cmd_reg[i].word_count-1])
+			// Forward dynamically registered commands to their owning module
+			if (reg->target_type == WAHE_CMD_TARGET_MODULE)
 			{
-				wahe_cmd_reg_t *reg = &group->cmd_reg[i];
+				// Transfer the command and any described payloads to the registered module
+				wahe_module_t *registered_module = &group->module[reg->module_id];
+				size_t registered_msg_addr = wahe_copy_message_between_modules(ctx, line, registered_module);
+				if (registered_msg_addr == 0)
+					return 0;
 
-				// Forward dynamically registered commands to their owning module
-				if (reg->target_type == WAHE_CMD_TARGET_MODULE)
-				{
-					if (reg->module_id == ctx->module_id)
-						continue;
+				// Call the registered module and release its combined input allocation
+				char *ret_msg = call_module_func(registered_module, registered_msg_addr, WAHE_FUNC_INPUT, 0);
+				call_module_free(registered_module, registered_msg_addr);
 
-					// Transfer the command and any described payloads to the registered module
-					wahe_module_t *registered_module = &group->module[reg->module_id];
-					size_t registered_msg_addr = wahe_copy_message_between_modules(ctx, line, registered_module);
-					if (registered_msg_addr == 0)
-						return 0;
-
-					// Call the registered module and release its combined input allocation
-					char *ret_msg = call_module_func(registered_module, registered_msg_addr, WAHE_FUNC_INPUT, 0);
-					call_module_free(registered_module, registered_msg_addr);
-
-					// Transfer any response back into the original calling module
-					if (ret_msg)
-						return_msg_addr = wahe_copy_message_between_modules(registered_module, ret_msg, ctx);
-					return return_msg_addr;
-				}
-
-				// Run host commands with the issuing module as their caller context
-				enum wahe_host_cmd_result result = reg->host_func(ctx, &line, &return_msg_addr);
-				if (result == WAHE_HOST_CMD_RETURN)
-					return return_msg_addr;
-				if (result == WAHE_HOST_CMD_HANDLED)
-				{
-					done = 1;
-					break;
-				}
+				// Transfer any response back into the original calling module
+				if (ret_msg)
+					return_msg_addr = wahe_copy_message_between_modules(registered_module, ret_msg, ctx);
+				return return_msg_addr;
 			}
+
+			// Run host commands with the issuing module as their caller context
+			enum wahe_host_cmd_result result = reg->host_func(ctx, &line, &return_msg_addr);
+			if (result == WAHE_HOST_CMD_RETURN)
+				return return_msg_addr;
+			if (result == WAHE_HOST_CMD_HANDLED)
+			{
+				done = 1;
+				break;
+			}
+		}
 		//**                         **
 
 loop_end:
