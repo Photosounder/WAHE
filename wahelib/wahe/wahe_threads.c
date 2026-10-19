@@ -302,6 +302,254 @@ static int wahe_join_module_thread(wahe_module_t *ctx, size_t id, char **reply, 
 }
 #endif
 
+#ifdef WAHE_WAMR
+static void wahe_delete_thread_runner(wahe_module_t *ctx, wahe_wamr_runner_t *runner)
+{
+	// Free guest allocations through a surviving runner after the worker has stopped
+	call_module_free(ctx, runner->input_addr);
+	call_module_free(ctx, runner->tls_alloc);
+
+	// Remove the stable runner object before destroying its WAMR child instance
+	rl_mutex_lock(&ctx->mutex);
+	ctx->wamr_runner[runner->runner_id] = NULL;
+	rl_mutex_unlock(&ctx->mutex);
+	if (runner->exec_env)
+		wasm_runtime_destroy_spawned_exec_env(runner->exec_env);
+	rl_mutex_destroy(&runner->mutex);
+	free(runner->thread_reply);
+	free(runner);
+}
+
+static int wahe_init_thread_exports(wahe_module_t *ctx, wahe_wamr_runner_t *runner)
+{
+	// Resolve only the new WAMR child instance's exported callbacks
+	for (int i = WAHE_FUNC_MALLOC; i < WAHE_FUNC_COUNT; i++)
+	{
+		// Match the standard exported callback names
+		char name[64];
+		snprintf(name, sizeof(name), "module_%s", i == WAHE_FUNC_INPUT ? "message_input" : wahe_func_name[i]);
+		runner->func[i] = wasm_runtime_lookup_function(runner->module_inst, name);
+	}
+
+	// Require the normal address-to-address worker callback ABI
+	return wahe_wamr_validate_address_function(ctx, runner, WAHE_FUNC_THREAD_ENTRY, 1, 1);
+}
+
+#ifdef _WIN32
+static unsigned __stdcall wahe_thread_main(void *argument)
+#else
+static void *wahe_thread_main(void *argument)
+#endif
+{
+	// Enter the dedicated WAMR runner without borrowing a chain's mutable state
+	wahe_wamr_runner_t *runner = argument;
+	wahe_cur_wamr_runner = runner;
+	wahe_cur_chain = NULL;
+	char *reply = call_module_func_on_runner(runner->module, runner->runner_id,
+		runner->input_addr, WAHE_FUNC_THREAD_ENTRY, 0);
+	if (reply)
+		runner->thread_reply = make_string_copy(reply);
+	wahe_cur_wamr_runner = NULL;
+	return 0;
+}
+
+static size_t wahe_create_module_thread(wahe_module_t *ctx, size_t stack_size, const char *message, const char **failure)
+{
+	// Accept only WAMR instances whose bounded shared memory can support children
+	*failure = "requires WAMR shared memory with a maximum";
+	if (!ctx->valid || ctx->type != WAHE_MODULE_WAMR || !ctx->thread_memory_safe)
+		return 0;
+
+	// Reject memory64 workers when the selected WAMR lacks auxiliary-stack discovery
+	*failure = "this WAMR build cannot create memory64 auxiliary stacks";
+	if (ctx->memory_bits == 64 && !WAHE_WAMR_MEMORY64_THREADS)
+		return 0;
+	*failure = "stack size must be positive and representable";
+	size_t address_max = ctx->memory_bits == 32 ? UINT32_MAX : SIZE_MAX;
+	if (!stack_size || stack_size > address_max - 15)
+		return 0;
+	stack_size = (stack_size + 15) & ~(size_t) 15;
+
+	// Require the linked auxiliary stack to satisfy the requested minimum
+	*failure = "requested stack exceeds the module's linked WAMR auxiliary stack";
+	if (!ctx->stack_base || ctx->data_end < ctx->stack_base || stack_size > ctx->stack_base)
+		return 0;
+
+	// Serialize runner publication and creation against joins and shutdown
+	rl_mutex_lock(&ctx->mutex);
+	*failure = "module is shutting down";
+	if (ctx->threads_stopping)
+	{
+		// Leave the registry unchanged once shutdown has started
+		rl_mutex_unlock(&ctx->mutex);
+		return 0;
+	}
+	*failure = "thread identifiers exhausted";
+	if (!ctx->next_thread_id)
+	{
+		// Never recycle a public thread ID into a stale handle
+		rl_mutex_unlock(&ctx->mutex);
+		return 0;
+	}
+
+	// Reuse empty runner slots or extend the pointer registry
+	size_t slot = ctx->initial_runner_count;
+	while (slot < ctx->runner_count && ctx->wamr_runner[slot])
+		slot++;
+	*failure = "host allocation failed";
+	if (slot == ctx->runner_count)
+	{
+		// Grow only the registry while every child object keeps its original address
+		if (slot == SIZE_MAX / sizeof(*ctx->wamr_runner))
+		{
+			rl_mutex_unlock(&ctx->mutex);
+			return 0;
+		}
+		wahe_wamr_runner_t **array = realloc(ctx->wamr_runner, (slot + 1) * sizeof(*array));
+		if (!array)
+		{
+			rl_mutex_unlock(&ctx->mutex);
+			return 0;
+		}
+		ctx->wamr_runner = array;
+		ctx->wamr_runner[slot] = NULL;
+		ctx->runner_count++;
+	}
+	wahe_wamr_runner_t *runner = calloc(1, sizeof(*runner));
+	if (!runner)
+	{
+		rl_mutex_unlock(&ctx->mutex);
+		return 0;
+	}
+	ctx->wamr_runner[slot] = runner;
+	runner->module = ctx;
+	runner->runner_id = slot;
+	runner->thread_id = ctx->next_thread_id++;
+	runner->stack_size = stack_size;
+	runner->creating = 1;
+	rl_mutex_init(&runner->mutex);
+	rl_mutex_unlock(&ctx->mutex);
+
+	// Spawn a WAMR child instance that shares memory and owns independent globals
+	*failure = "WAMR child creation failed; enable thread manager, shared memory and heap auxiliary stacks";
+	wahe_wamr_runner_t *parent_runner = wahe_cur_wamr_runner && wahe_cur_wamr_runner->module == ctx ?
+		wahe_cur_wamr_runner : ctx->wamr_runner[0];
+	runner->exec_env = wasm_runtime_spawn_exec_env(parent_runner->exec_env);
+	int initialized = runner->exec_env != NULL;
+	if (initialized)
+	{
+		// Attach stable WAHE identities to the spawned execution environment
+		runner->module_inst = wasm_runtime_get_module_inst(runner->exec_env);
+		wasm_runtime_set_custom_data(runner->module_inst, ctx);
+		wasm_runtime_set_user_data(runner->exec_env, runner);
+
+		// Blank the auxiliary stack before initializing independent LLVM TLS
+		*failure = "WAMR auxiliary stack initialization failed";
+		initialized = wahe_wamr_blank_aux_stack(ctx, runner);
+
+		// Resolve the worker callback and initialize independent LLVM TLS
+		if (initialized)
+		{
+			*failure = "module_thread_entry must have the usual text callback signature";
+			initialized = wahe_init_thread_exports(ctx, runner);
+		}
+		if (initialized)
+		{
+			*failure = "TLS initialization failed; export __tls_size, __tls_align and __wasm_init_tls";
+			initialized = wahe_wamr_init_thread_tls(ctx, runner, 1);
+		}
+		if (initialized)
+		{
+			// Copy the opaque input into shared module memory owned until join
+			*failure = "entry message allocation failed";
+			size_t length = strlen(message) + 1;
+			runner->input_addr = call_module_malloc(ctx, length);
+			initialized = runner->input_addr != 0;
+			if (initialized)
+				memcpy(ctx->memory_ptr + runner->input_addr, message, length);
+		}
+	}
+
+	// Start one OS thread after its WAMR child context is complete
+	if (initialized)
+	{
+		*failure = "OS thread creation failed";
+		#ifdef _WIN32
+		runner->thread_handle = (void *) _beginthreadex(NULL, 0, wahe_thread_main, runner, 0, NULL);
+		initialized = runner->thread_handle != NULL;
+		#else
+		pthread_t *handle = malloc(sizeof(*handle));
+		initialized = handle && pthread_create(handle, NULL, wahe_thread_main, runner) == 0;
+		if (initialized)
+			runner->thread_handle = handle;
+		else
+			free(handle);
+		#endif
+	}
+	size_t id = initialized ? runner->thread_id : 0;
+	if (!initialized)
+		wahe_delete_thread_runner(ctx, runner);
+	else
+	{
+		// Publish the join handle only after the OS thread exists
+		rl_mutex_lock(&ctx->mutex);
+		runner->creating = 0;
+		rl_mutex_unlock(&ctx->mutex);
+	}
+	return id;
+}
+
+static int wahe_join_module_thread(wahe_module_t *ctx, size_t id, char **reply, const char **failure)
+{
+	// Claim the WAMR worker once without holding the registry lock while waiting
+	*failure = "unknown thread ID or thread already being joined";
+	*reply = NULL;
+	rl_mutex_lock(&ctx->mutex);
+	wahe_wamr_runner_t *runner = NULL;
+	for (size_t i = ctx->initial_runner_count; i < ctx->runner_count; i++)
+		if (ctx->wamr_runner[i] && ctx->wamr_runner[i]->thread_id == id &&
+			!ctx->wamr_runner[i]->creating && !ctx->wamr_runner[i]->joining)
+			runner = ctx->wamr_runner[i];
+	if (runner == wahe_cur_wamr_runner && runner)
+	{
+		// Reject self-joins rather than waiting forever
+		*failure = "a thread cannot join itself";
+		runner = NULL;
+	}
+	if (runner)
+		runner->joining = 1;
+	rl_mutex_unlock(&ctx->mutex);
+	if (!runner)
+		return 0;
+
+	// Wait for completion and release the platform's joinable thread handle
+	#ifdef _WIN32
+	int joined = WaitForSingleObject(runner->thread_handle, INFINITE) == WAIT_OBJECT_0;
+	if (joined)
+		CloseHandle(runner->thread_handle);
+	#else
+	int joined = pthread_join(*(pthread_t *) runner->thread_handle, NULL) == 0;
+	if (joined)
+		free(runner->thread_handle);
+	#endif
+	if (!joined)
+	{
+		// Leave the handle joinable after an OS-level wait failure
+		rl_mutex_lock(&ctx->mutex);
+		runner->joining = 0;
+		rl_mutex_unlock(&ctx->mutex);
+		*failure = "OS thread join failed";
+		return 0;
+	}
+
+	// Transfer the copied reply before destroying the WAMR child instance
+	*reply = runner->thread_reply;
+	runner->thread_reply = NULL;
+	wahe_delete_thread_runner(ctx, runner);
+	return 1;
+}
+#endif
+
 void wahe_module_join_threads(wahe_module_t *ctx)
 {
 	#ifdef WAHE_WASMTIME
@@ -353,6 +601,62 @@ void wahe_module_join_threads(wahe_module_t *ctx)
 		else
 		{
 			// Let in-flight joins finish without spinning on the module registry
+			#ifdef _WIN32
+			Sleep(1);
+			#else
+			usleep(1000);
+			#endif
+		}
+	}
+	#elif defined(WAHE_WAMR)
+	// Prevent new WAMR workers before waiting for existing workers to finish
+	if (!ctx || ctx->type != WAHE_MODULE_WAMR)
+		return;
+	if (wahe_cur_wamr_runner && wahe_cur_wamr_runner->module == ctx && wahe_cur_wamr_runner->thread_id)
+	{
+		// Keep worker code from waiting on itself during shutdown
+		fprintf_rl(stderr, "Cannot shut down threads of module %s from one of its workers\n", ctx->module_name);
+		return;
+	}
+	rl_mutex_lock(&ctx->mutex);
+	ctx->threads_stopping = 1;
+	int notify = 0;
+	for (size_t i = ctx->initial_runner_count; i < ctx->runner_count; i++)
+		if (ctx->wamr_runner[i])
+			notify = 1;
+	notify = notify && ctx->wamr_runner[0]->func[WAHE_FUNC_INPUT] != NULL;
+	rl_mutex_unlock(&ctx->mutex);
+
+	// Let continuous workers receive a cooperative stop request
+	if (notify)
+		wahe_send_input(ctx, "Stop threads");
+
+	for (;;)
+	{
+		// Snapshot an unclaimed WAMR worker while respecting concurrent joins
+		size_t id = 0, remaining = 0;
+		rl_mutex_lock(&ctx->mutex);
+		for (size_t i = ctx->initial_runner_count; i < ctx->runner_count; i++)
+			if (ctx->wamr_runner[i])
+			{
+				remaining++;
+				if (!ctx->wamr_runner[i]->creating && !ctx->wamr_runner[i]->joining)
+					id = ctx->wamr_runner[i]->thread_id;
+			}
+		rl_mutex_unlock(&ctx->mutex);
+		if (!remaining)
+			return;
+		if (id)
+		{
+			// Release each completed worker and discard its optional shutdown reply
+			char *reply = NULL;
+			const char *failure;
+			if (wahe_join_module_thread(ctx, id, &reply, &failure))
+				free(reply);
+		}
+		else
+		{
+			// Let in-flight joins finish without spinning on the registry
 			#ifdef _WIN32
 			Sleep(1);
 			#else

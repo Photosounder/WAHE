@@ -198,6 +198,14 @@ static size_t wasmtime_val_get_address(wasmtime_val_t val)
 }
 #endif // WAHE_WASMTIME
 
+#ifdef WAHE_WAMR
+static size_t wahe_active_runner_id(wahe_module_t *ctx)
+{
+	// Delegate active-runner selection to the WAMR callback context
+	return wahe_wamr_active_runner_id(ctx);
+}
+#endif // WAHE_WAMR
+
 static int wahe_init_module_memory(wahe_module_t *ctx)
 {
 	// Accept host memory as already initialized
@@ -220,6 +228,17 @@ static int wahe_init_module_memory(wahe_module_t *ctx)
 	// Leave directly compiled native memory for the module to initialize
 	if (ctx->type == WAHE_MODULE_NATIVE)
 		return 1;
+
+	// Refresh memory metadata already established during WAMR instantiation
+	if (ctx->type == WAHE_MODULE_WAMR)
+	{
+		#ifdef WAHE_WAMR
+		return wahe_wamr_refresh_memory(ctx, 0);
+		#else
+		fprintf_rl(stderr, "Cannot initialise WAMR memory for module %s because WAHE was built without WAMR support\n", ctx->module_name);
+		return 0;
+		#endif
+	}
 
 	// Reject module types without Wasmtime memory
 	if (ctx->type != WAHE_MODULE_WASMTIME)
@@ -278,6 +297,15 @@ static int wahe_init_module_memory(wahe_module_t *ctx)
 
 static void wahe_refresh_module_memory_size(wahe_module_t *ctx)
 {
+	#ifdef WAHE_WAMR
+	// Refresh the WAMR page extent while enforcing its fixed base address
+	if (ctx && ctx->type == WAHE_MODULE_WAMR)
+	{
+		wahe_wamr_refresh_memory(ctx, 1);
+		return;
+	}
+	#endif
+
 	#ifdef WAHE_WASMTIME
 	// Refresh only Wasmtime memories whose committed size can grow
 	if (ctx == NULL || ctx->type != WAHE_MODULE_WASMTIME)
@@ -310,6 +338,12 @@ static void wahe_refresh_module_memory_size(wahe_module_t *ctx)
 
 size_t wahe_get_module_memory_size(wahe_module_t *ctx)
 {
+	#ifdef WAHE_WAMR
+	// Read the current WAMR extent before returning the common cached field
+	if (ctx && ctx->type == WAHE_MODULE_WAMR)
+		wahe_wamr_refresh_memory(ctx, 0);
+	#endif
+
 	// Read shared memory's current extent without racing the cached growth-reporting field
 	#ifdef WAHE_WASMTIME
 	if (ctx && ctx->type == WAHE_MODULE_WASMTIME && ctx->shared_memory)
@@ -321,7 +355,8 @@ size_t wahe_get_module_memory_size(wahe_module_t *ctx)
 static int wahe_blank_module_stack(wahe_module_t *ctx)
 {
 	// Ignore modules that do not use a Wasm linear memory
-	if (ctx == NULL || (ctx->type != WAHE_MODULE_WASMTIME && ctx->type != WAHE_MODULE_WASM_TO_NATIVE))
+	if (ctx == NULL || (ctx->type != WAHE_MODULE_WASMTIME && ctx->type != WAHE_MODULE_WAMR &&
+		ctx->type != WAHE_MODULE_WASM_TO_NATIVE))
 		return 1;
 
 	// Accept modules without a declared stack region
@@ -387,6 +422,13 @@ static size_t wahe_get_module_symbol_address_on_runner(wahe_module_t *ctx, size_
 
 		#endif // WAHE_WASMTIME
 	}
+	else if (ctx->type == WAHE_MODULE_WAMR)
+	{
+		#ifdef WAHE_WAMR
+		// Read the exported global from the selected WAMR child instance
+		addr = wahe_wamr_get_symbol_address(ctx, runner_id, symbol_name, verbosity);
+		#endif // WAHE_WAMR
+	}
 	else
 	{
 		// Report symbol lookup with an uninitialized module type
@@ -398,8 +440,8 @@ static size_t wahe_get_module_symbol_address_on_runner(wahe_module_t *ctx, size_
 
 size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_name, int verbosity)
 {
-	// Resolve Wasmtime globals in the active runner and all other symbols normally
-	#ifdef WAHE_WASMTIME
+	// Resolve runtime globals in the active runner and all other symbols normally
+	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
 	size_t runner_id = 0;
@@ -451,6 +493,14 @@ void wahe_get_module_func(wahe_module_t *ctx, const char *func_name, enum wahe_f
 				fprintf_rl(stdout, "Module #%d %s runner %zu: %s() found\n", ctx->module_id, ctx->module_name, runner_id, func_name);
 		}
 		#endif // WAHE_WASMTIME
+	}
+	else if (ctx->type == WAHE_MODULE_WAMR)
+	{
+		#ifdef WAHE_WAMR
+		// Resolve the instance-specific WAMR function handle in every runner
+		for (size_t runner_id = 0; runner_id < ctx->runner_count; runner_id++)
+			wahe_wamr_get_function(ctx, runner_id, func_name, func_id, verbosity);
+		#endif // WAHE_WAMR
 	}
 	else
 	{
@@ -534,8 +584,9 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 			}
 		}
 	}
-	else if (ctx->type == WAHE_MODULE_WASMTIME)
+	else if (ctx->type == WAHE_MODULE_WASMTIME || ctx->type == WAHE_MODULE_WAMR)
 	{
+		// Read standard WebAssembly layout globals through the selected runtime
 		ctx->heap_base = wahe_get_module_symbol_address(ctx, "__heap_base", 0);
 		ctx->data_end = wahe_get_module_symbol_address(ctx, "__data_end", 0);
 	}
@@ -657,6 +708,93 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 		__atomic_store_n((int32_t *) &ctx->memory_ptr[ctx->cita_time_addr], timestamp, __ATOMIC_RELAXED);
 		#endif
 	}
+
+	#ifdef WAHE_WAMR
+	// Dispatch through the selected WAMR execution environment
+	if (ctx->type == WAHE_MODULE_WAMR)
+	{
+		wahe_wamr_runner_t *runner = wahe_get_wamr_runner(ctx, runner_id, "call a module function");
+		if (runner == NULL)
+			return 0;
+
+		// Reject missing exports and functions whose ABI does not match the address ABI
+		if (runner->func[func_id] == NULL)
+		{
+			fprintf_rl(stderr, "Cannot call %s runner %zu:%s() because the WAMR function is not exported\n",
+				ctx->module_name, runner_id, wahe_func_name[func_id]);
+			return 0;
+		}
+		uint32_t result_count = func_id == WAHE_FUNC_FREE ? 0 : 1;
+		if (!wahe_wamr_validate_address_function(ctx, runner, func_id, (uint32_t) arg_count, result_count))
+		{
+			fprintf_rl(stderr, "Cannot call %s runner %zu:%s() because its WAMR signature does not match the module address ABI\n",
+				ctx->module_name, runner_id, wahe_func_name[func_id]);
+			return 0;
+		}
+
+		// Record the function selected by the current execution chain
+		wahe_chain_t *chain = wahe_cur_chain;
+		wahe_bench_point("calling function", 1);
+		int prev_func = WAHE_FUNC_NONE;
+		if (chain)
+		{
+			prev_func = chain->current_func;
+			chain->current_func = func_id;
+		}
+
+		// Call WAMR and publish a process-wide failure before other chains continue
+		ret_val = 0;
+		wahe_wait_after_execution_failure();
+		int called = wahe_wamr_call(ctx, runner, func_id, arg, arg_count, &ret_val);
+		int first_failure = called ? 0 : wahe_claim_execution_failure();
+
+		// Restore chain diagnostics after the call returns
+		if (chain)
+			chain->current_func = prev_func;
+		wahe_bench_point("function returned", -1);
+
+		// Stop after a trapped or otherwise failed WAMR call
+		if (!called)
+		{
+			if (!first_failure)
+				wahe_wait_after_execution_failure();
+			ctx->valid = 0;
+			fflush(stdout);
+			fflush(stderr);
+			#ifdef _WIN32
+			if (IsDebuggerPresent())
+				DebugBreak();
+			else
+			{
+				// Keep an interactive console open until the failure has been inspected
+				DWORD console_mode;
+				if (GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &console_mode))
+				{
+					fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
+					fflush(stderr);
+					int character;
+					do character = getchar(); while (character != '\n' && character != EOF);
+				}
+			}
+			#else
+			// Keep an interactive terminal open until the failure has been inspected
+			if (isatty(STDIN_FILENO))
+			{
+				fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
+				fflush(stderr);
+				int character;
+				do character = getchar(); while (character != '\n' && character != EOF);
+			}
+			#endif
+			_Exit(EXIT_FAILURE);
+		}
+
+		// Refresh the active extent after calls that may have grown memory
+		wahe_wait_after_execution_failure();
+		wahe_refresh_module_memory_size(ctx);
+		return ret_val;
+	}
+	#endif // WAHE_WAMR
 
 	// Reject module types that cannot use Wasmtime dispatch
 	if (ctx->type != WAHE_MODULE_WASMTIME)
@@ -827,7 +965,7 @@ char *call_module_func_on_runner(wahe_module_t *ctx, size_t runner_id, size_t me
 	// Reject return addresses outside a Wasm module's active linear memory
 	wahe_refresh_module_memory_size(ctx);
 	size_t memory_size = wahe_get_module_memory_size(ctx);
-	if ((ctx->type != WAHE_MODULE_WASMTIME && ctx->type != WAHE_MODULE_WASM_TO_NATIVE) ||
+	if ((ctx->type != WAHE_MODULE_WASMTIME && ctx->type != WAHE_MODULE_WAMR && ctx->type != WAHE_MODULE_WASM_TO_NATIVE) ||
 		ctx->memory_ptr == NULL || *ret_msg_addr >= memory_size)
 	{
 		fprintf_rl(stderr, "Module %s returned invalid message address %#zx for its %zu-byte active memory\n",
@@ -843,7 +981,7 @@ char *call_module_func_on_runner(wahe_module_t *ctx, size_t runner_id, size_t me
 size_t call_module_malloc(wahe_module_t *ctx, size_t size)
 {
 	// Use the active callback runner or runner zero
-	#ifdef WAHE_WASMTIME
+	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
 	size_t runner_id = 0;
@@ -854,7 +992,7 @@ size_t call_module_malloc(wahe_module_t *ctx, size_t size)
 size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
 {
 	// Use the active callback runner or runner zero
-	#ifdef WAHE_WASMTIME
+	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
 	size_t runner_id = 0;
@@ -865,7 +1003,7 @@ size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
 void call_module_free(wahe_module_t *ctx, size_t address)
 {
 	// Use the active callback runner or runner zero
-	#ifdef WAHE_WASMTIME
+	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
 	size_t runner_id = 0;
@@ -876,7 +1014,7 @@ void call_module_free(wahe_module_t *ctx, size_t address)
 char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_id func_id, int call_from_eo)
 {
 	// Use the active callback runner or runner zero
-	#ifdef WAHE_WASMTIME
+	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
 	size_t runner_id = 0;
@@ -914,7 +1052,7 @@ static size_t module_sprintf_alloc_on_runner(wahe_module_t *ctx, size_t runner_i
 size_t module_vsprintf_alloc(wahe_module_t *ctx, const char *format, va_list args)
 {
 	// Select the active callback runner or runner zero
-	#ifdef WAHE_WASMTIME
+	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
 	size_t runner_id = 0;
@@ -1263,7 +1401,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	ctx->parent_group = parent_group;
 	ctx->module_id = module_index;
 	ctx->runner_count = runner_count ? runner_count : 1;
-	#ifdef WAHE_WASMTIME
+	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	ctx->initial_runner_count = ctx->runner_count;
 	ctx->next_thread_id = 1;
 	#endif
@@ -1271,10 +1409,7 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	// WASM module
 	if (check_if_file_is_wasm(path))
 	{
-		// Record the Wasmtime module type
-		ctx->type = WAHE_MODULE_WASMTIME;
-
-		#ifdef WAHE_WASMTIME
+		#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 		// Load WASM file
 		buffer_t wasm_buf = buf_load_raw_file(path);
 		if (wasm_buf.buf == NULL)
@@ -1288,8 +1423,9 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		io_override_set_buffer();
 		ctx->stack_base = wasmbin_read_stack_pointer((FILE *) &wasm_buf);
 		int memory_found = wasmbin_read_memory_info((FILE *) &wasm_buf, &memory_info);
-		ctx->thread_memory_safe = memory_found && memory_info.imported && memory_info.shared &&
-			memory_info.maximum_present && wasmbin_has_only_passive_data((FILE *) &wasm_buf);
+		#ifdef WAHE_WASMTIME
+		int passive_data_only = memory_found && wasmbin_has_only_passive_data((FILE *) &wasm_buf);
+		#endif
 		io_override_set_FILE();
 		if (!memory_found)
 		{
@@ -1301,6 +1437,12 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		ctx->page_count_max = memory_info.max_pages;
 		ctx->memory_is_shared = memory_info.shared;
 		ctx->memory_bits = memory_info.memory64 ? 64 : 32;
+
+		#ifdef WAHE_WASMTIME
+		// Record the Wasmtime module type and its separate-instance sharing requirements
+		ctx->type = WAHE_MODULE_WASMTIME;
+		ctx->thread_memory_safe = memory_info.imported && memory_info.shared &&
+			memory_info.maximum_present && passive_data_only;
 		ctx->address_type = memory_info.memory64 ? WASMTIME_I64 : WASMTIME_I32;
 
 		// Require an imported shared memory when multiple instances must share it
@@ -1413,17 +1555,96 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		// Print details
 		fprintf_rl(stdout, "%zu runners, total stack region %#zx, heap base %#zx, data end %#zx\n", ctx->runner_count, ctx->stack_base, ctx->heap_base, ctx->data_end);
 		fprintf_rl(stdout, "Initial memory %" PRIu64 " kB, max memory %" PRIu64 " kB%s\n", (uint64_t) (ctx->page_count_initial*64ULL), (uint64_t) (ctx->page_count_max*64ULL), ctx->memory_is_shared ? ", shared" : "");
+		#endif // WAHE_WASMTIME
+
+		#ifdef WAHE_WAMR
+		// Record WAMR's child-instance sharing requirements
+		ctx->type = WAHE_MODULE_WAMR;
+		ctx->thread_memory_safe = memory_info.shared && memory_info.maximum_present;
+
+		// Reject memory imports because WAMR's embedding API does not accept a host memory object
+		if (memory_info.imported)
+		{
+			fprintf_rl(stderr, "Module %s imports linear memory, which the WAMR embedding path cannot provide\n", ctx->module_name);
+			free_buf(&wasm_buf);
+			return;
+		}
+
+		// Preserve WAHE's fixed-address contract when WAMR grows linear memory
+		if (!memory_info.shared && (!memory_info.maximum_present || memory_info.max_pages != memory_info.base_pages))
+		{
+			fprintf_rl(stderr, "Module %s has growable unshared memory, which WAMR may move; use bounded shared memory or make its initial and maximum sizes equal\n",
+				ctx->module_name);
+			free_buf(&wasm_buf);
+			return;
+		}
+
+		// Require shareable bounded memory before creating multiple WAMR child instances
+		if (ctx->runner_count > 1 && !ctx->thread_memory_safe)
+		{
+			fprintf_rl(stderr, "Module %s requests %zu runners but WAMR requires shared memory with a maximum\n",
+				ctx->module_name, ctx->runner_count);
+			free_buf(&wasm_buf);
+			return;
+		}
+
+		// Reject memory64 children until the selected WAMR can discover their auxiliary stack
+		if (ctx->runner_count > 1 && ctx->memory_bits == 64 && !WAHE_WAMR_MEMORY64_THREADS)
+		{
+			fprintf_rl(stderr, "Module %s requests %zu runners but this WAMR build cannot create memory64 auxiliary stacks\n",
+				ctx->module_name, ctx->runner_count);
+			free_buf(&wasm_buf);
+			return;
+		}
+
+		// Load and instantiate the module while transferring ownership of the writable image
+		if (!wahe_wamr_init_module(ctx, wasm_buf.buf, wasm_buf.len))
+		{
+			free_buf(&wasm_buf);
+			return;
+		}
+		wasm_buf.buf = NULL;
+		wasm_buf.as = 0;
+		wasm_buf.len = 0;
+
+		// Resolve every child instance's functions and the common module metadata
+		wahe_init_all_module_symbols(ctx);
+		ctx->stack_ptr_addr = wahe_wamr_get_symbol_data(ctx, 0, "__stack_pointer");
+		ctx->valid = 1;
+		if (!wahe_init_module_memory(ctx))
+		{
+			ctx->valid = 0;
+			return;
+		}
+
+		// Blank and initialize additional configured WAMR runner state
+		for (size_t i = 1; i < ctx->initial_runner_count; i++)
+			if (!wahe_wamr_blank_aux_stack(ctx, ctx->wamr_runner[i]) ||
+				!wahe_wamr_init_thread_tls(ctx, ctx->wamr_runner[i], 0))
+			{
+				fprintf_rl(stderr, "Stack or TLS initialization failed for WAMR module %s runner %zu\n", ctx->module_name, i);
+				ctx->valid = 0;
+				return;
+			}
+
+		// Print WAMR module details using the same common layout metadata
+		fprintf_rl(stdout, "%zu runners, total stack region %#zx, heap base %#zx, data end %#zx\n",
+			ctx->runner_count, ctx->stack_base, ctx->heap_base, ctx->data_end);
+		fprintf_rl(stdout, "Initial memory %" PRIu64 " kB, max memory %" PRIu64 " kB%s\n",
+			(uint64_t) (ctx->page_count_initial * 64ULL), (uint64_t) (ctx->page_count_max * 64ULL),
+			ctx->memory_is_shared ? ", shared" : "");
+		#endif // WAHE_WAMR
 
 		#else
 		ctx->valid = 0;
-		fprintf_rl(stderr, "Cannot initiate WASM module %s when WAHE is compiled without WASM support\n", ctx->module_name);
+		fprintf_rl(stderr, "Cannot initiate WASM module %s when WAHE is compiled without a WebAssembly runtime\n", ctx->module_name);
 		return;
-		#endif // WAHE_WASMTIME
+		#endif
 	}
 	// Native module
 	else if ((ctx->native = dynlib_open(path)))
 	{
-		// Reject multiple runners for module types without separate Wasmtime stores
+		// Reject multiple runners for module types without separate WebAssembly instances
 		if (ctx->runner_count != 1)
 		{
 			fprintf_rl(stderr, "Native module %s cannot be initialized with %zu runners\n", ctx->module_name, ctx->runner_count);
@@ -1496,7 +1717,7 @@ void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size
 		return;
 	}
 
-	// Synchronize Wasmtime sizes before validating module-relative ranges
+	// Synchronize WebAssembly runtime sizes before validating module-relative ranges
 	wahe_refresh_module_memory_size(src_module);
 	wahe_refresh_module_memory_size(dst_module);
 	size_t src_size = wahe_get_module_memory_size(src_module), dst_size = wahe_get_module_memory_size(dst_module);
@@ -1963,7 +2184,7 @@ size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, co
 size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module)
 {
 	// Select the active destination runner or runner zero
-	#ifdef WAHE_WASMTIME
+	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(dst_module);
 	#else
 	size_t runner_id = 0;

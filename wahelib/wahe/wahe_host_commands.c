@@ -84,8 +84,8 @@ static enum wahe_host_cmd_result wahe_hcmd_shrink_memory(wahe_module_t *ctx, con
 	if (end == 0)
 		return WAHE_HOST_CMD_NOT_HANDLED;
 
-	// Ignore shrink requests for Wasmtime memory because WebAssembly memory cannot shrink
-	if (ctx->type == WAHE_MODULE_WASMTIME)
+	// Ignore shrink requests for runtime-owned WebAssembly memory because it cannot shrink
+	if (ctx->type == WAHE_MODULE_WASMTIME || ctx->type == WAHE_MODULE_WAMR)
 		return WAHE_HOST_CMD_HANDLED;
 
 	// Decommit only valid shrinkage within an existing reservation
@@ -269,16 +269,16 @@ static enum wahe_host_cmd_result wahe_hcmd_get_stack_pointer(wahe_module_t *ctx,
 	if (!wahe_hcmd_ends_at(*line, sizeof("Get stack pointer")-1))
 		return WAHE_HOST_CMD_NOT_HANDLED;
 
-	// Read the stack pointer exported by a WASM module
-	if (ctx->type == WAHE_MODULE_WASMTIME)
+	// Read the stack pointer exported by a runtime-managed WASM module
+	if (ctx->type == WAHE_MODULE_WASMTIME || ctx->type == WAHE_MODULE_WAMR)
 	{
 		size_t ptr = wahe_get_module_symbol_address(ctx, "__stack_pointer", 0);
 		*return_msg_addr = module_sprintf_alloc(ctx, "%#zx", ptr);
 	}
 	else
 	{
-		// Report use of a Wasmtime-only metadata command
-		fprintf_rl(stderr, "Module %s requested its Wasmtime stack pointer with module type %d\n", ctx->module_name, ctx->type);
+		// Report use of runtime-managed metadata by another module type
+		fprintf_rl(stderr, "Module %s requested its runtime stack pointer with module type %d\n", ctx->module_name, ctx->type);
 	}
 	return WAHE_HOST_CMD_HANDLED;
 }
@@ -455,13 +455,13 @@ static enum wahe_host_cmd_result wahe_hcmd_thread_create(wahe_module_t *ctx, con
 			if (isfinite(bytes) && bytes > 0. && bytes < (double) SIZE_MAX && bytes == floor(bytes))
 			{
 				// Pass the remaining text verbatim to the new worker
-				#ifdef WAHE_WASMTIME
+				#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 				const char *message = *line + end;
 				if (*message == '\n')
 					message++;
 				id = wahe_create_module_thread(ctx, (size_t) bytes, message, &failure);
 				#else
-				failure = "host was built without Wasmtime support";
+				failure = "host was built without WebAssembly thread support";
 				#endif
 			}
 		}
@@ -481,14 +481,14 @@ static enum wahe_host_cmd_result wahe_hcmd_thread_join(wahe_module_t *ctx, const
 	sscanf(*line, "Join thread ID %zu%n", &id, &end);
 	if (end && wahe_hcmd_ends_at(*line, end))
 	{
-		// Reject native callers without attempting to access a Wasmtime runner registry
-		#ifdef WAHE_WASMTIME
-		if (ctx->type == WAHE_MODULE_WASMTIME)
+		// Reject native callers without accessing a WebAssembly runner registry
+		#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
+		if (ctx->type == WAHE_MODULE_WASMTIME || ctx->type == WAHE_MODULE_WAMR)
 			joined = wahe_join_module_thread(ctx, id, &reply, &failure);
 		else
-			failure = "only Wasmtime modules can create threads";
+			failure = "only runtime-managed WebAssembly modules can create threads";
 		#else
-		failure = "host was built without Wasmtime support";
+		failure = "host was built without WebAssembly thread support";
 		#endif
 	}
 	*return_msg_addr = joined ? module_sprintf_alloc(ctx, "Thread joined %zu\n%s", id, reply ? reply : "") :
@@ -506,6 +506,9 @@ static enum wahe_host_cmd_result wahe_hcmd_get_thread_id(wahe_module_t *ctx, con
 	#ifdef WAHE_WASMTIME
 	if (wahe_cur_wasmtime_runner && wahe_cur_wasmtime_runner->module == ctx)
 		id = wahe_cur_wasmtime_runner->thread_id;
+	#elif defined(WAHE_WAMR)
+	if (wahe_cur_wamr_runner && wahe_cur_wamr_runner->module == ctx)
+		id = wahe_cur_wamr_runner->thread_id;
 	#endif
 	*return_msg_addr = module_sprintf_alloc(ctx, "Thread ID %zu\n", id);
 	return WAHE_HOST_CMD_RETURN;

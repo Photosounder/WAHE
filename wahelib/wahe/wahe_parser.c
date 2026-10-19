@@ -130,7 +130,7 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 				continue;
 			}
 
-			// Parse the optional Wasmtime runner count
+			// Parse the optional WebAssembly runner count
 			size_t runner_count = 1;
 			int runner_count_end = 0;
 			int runner_count_valid = 1;

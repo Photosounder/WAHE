@@ -61,7 +61,8 @@ char *wahe_execute_chain_from_module(wahe_chain_t *chain, const char *input_msg,
 							const char *src_message = NULL;
 							if (src_module->type == WAHE_MODULE_NATIVE)
 								src_message = (const char *) src_addr;
-							else if (src_module->type == WAHE_MODULE_WASMTIME || src_module->type == WAHE_MODULE_WASM_TO_NATIVE)
+							else if (src_module->type == WAHE_MODULE_WASMTIME || src_module->type == WAHE_MODULE_WAMR ||
+								src_module->type == WAHE_MODULE_WASM_TO_NATIVE)
 							{
 								// Reject stale or malformed return offsets before forming a host pointer
 								size_t memory_size = wahe_get_module_memory_size(src_module);

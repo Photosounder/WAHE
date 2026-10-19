@@ -2,16 +2,21 @@
 #define WAHELIB_H
 
 #ifndef WAHE_STACK_BLANK_PATTERN
-  #define WAHE_STACK_BLANK_PATTERN 0x01
+  #define WAHE_STACK_BLANK_PATTERN 0xC9
 #endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+  #if defined(WAHE_WASMTIME) && defined(WAHE_WAMR)
+    #error WAHE supports one WebAssembly runtime per build
+  #endif
+
   #include <stdio.h>
   #include <stdlib.h>
   #include <stdint.h>
+  #include <stdbool.h>
   #include <stdarg.h>
   #include <math.h>
   #include <inttypes.h>
@@ -53,6 +58,10 @@ extern "C" {
     #endif
 
     #include <wasmtime.h>
+  #endif
+
+  #ifdef WAHE_WAMR
+    #include <wasm_export.h>
   #endif
 
   #include "wahe/wahe_core.h"

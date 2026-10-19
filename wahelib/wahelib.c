@@ -11,6 +11,7 @@
   #include "rl_utils/time.c"
 #endif
 
+#include "wahe/wahe_wamr.c"
 #include "wahe/wahe_core.c"
 #include "wahe/wahe_threads.c"
 #include "wahe/wahe_host_commands.c"

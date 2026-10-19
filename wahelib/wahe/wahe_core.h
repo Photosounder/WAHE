@@ -29,6 +29,7 @@ enum wahe_module_type
 {
 	WAHE_MODULE_NONE,
 	WAHE_MODULE_WASMTIME,
+	WAHE_MODULE_WAMR,
 	WAHE_MODULE_WASM_TO_NATIVE,
 	WAHE_MODULE_NATIVE
 };
@@ -60,6 +61,22 @@ typedef struct
 } wahe_wasmtime_runner_t;
 #endif // WAHE_WASMTIME
 
+#ifdef WAHE_WAMR
+typedef struct
+{
+	wahe_module_t *module;
+	size_t runner_id;
+	rl_mutex_t mutex;
+	wasm_module_inst_t module_inst;
+	wasm_exec_env_t exec_env;
+	wasm_function_inst_t func[WAHE_FUNC_COUNT];
+	size_t thread_id, stack_alloc, stack_start, stack_size, tls_alloc, input_addr;
+	void *thread_handle;
+	char *thread_reply;
+	int creating, joining;
+} wahe_wamr_runner_t;
+#endif // WAHE_WAMR
+
 struct wahe_module_t
 {
 	int valid;
@@ -87,6 +104,17 @@ struct wahe_module_t
 	int memory_is_shared;
 	wasmtime_valkind_t address_type;
 	#endif // WAHE_WASMTIME
+
+	#ifdef WAHE_WAMR
+	wasm_module_t wamr_module;
+	wasm_memory_inst_t wamr_memory;
+	uint8_t *wamr_module_buffer;
+	size_t wamr_module_buffer_size;
+	wahe_wamr_runner_t **wamr_runner;
+	size_t initial_runner_count, next_thread_id;
+	int thread_memory_safe, threads_stopping;
+	int memory_is_shared;
+	#endif // WAHE_WAMR
 
 	// Specific to native modules
 	void *native, *dl_func[WAHE_FUNC_COUNT];
@@ -207,8 +235,12 @@ extern size_t wahe_get_module_memory_size(wahe_module_t *ctx);
 extern void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr);
 extern size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module, size_t dst_runner_id);
 extern size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module);
+extern size_t wahe_run_command_core(wahe_module_t *ctx, char *message);
 
 extern char *wahe_run_command_with_id_native(wahe_module_t *ctx, char *message);
 #ifdef WAHE_WASMTIME
 extern wasm_trap_t *wahe_run_command(void *env, wasmtime_caller_t *caller, const wasmtime_val_t *arg, size_t arg_count, wasmtime_val_t *result, size_t result_count);
 #endif // WAHE_WASMTIME
+#ifdef WAHE_WAMR
+extern void wahe_run_command_wamr(wasm_exec_env_t exec_env, uint64_t *args);
+#endif // WAHE_WAMR
