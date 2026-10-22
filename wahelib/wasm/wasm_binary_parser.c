@@ -11,6 +11,9 @@ int check_if_file_is_wasm(const char *path)
 
 	fread(buffer, 1, sizeof(buffer), file);
 
+	// Close the file after reading its signature
+	fclose(file);
+
 	return memcmp(sig, buffer, sizeof(buffer)) == 0;
 }
 
