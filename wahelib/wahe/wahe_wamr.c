@@ -31,6 +31,15 @@ static int wahe_wamr_runtime_init(void)
 	RuntimeInitArgs init_args = {0};
 	init_args.mem_alloc_type = Alloc_With_System_Allocator;
 	init_args.max_thread_num = WAHE_WAMR_MAX_THREADS;
+
+	// Prefer LLVM JIT when available so SIMD modules never enter the scalar interpreter
+	if (wasm_runtime_is_running_mode_supported(Mode_LLVM_JIT))
+	{
+		init_args.running_mode = Mode_LLVM_JIT;
+		init_args.llvm_jit_opt_level = 2;
+	}
+
+	// Initialize the selected execution engine before registering module imports
 	if (!wasm_runtime_full_init(&init_args))
 	{
 		fprintf_rl(stderr, "Initializing the WAMR runtime failed\n");

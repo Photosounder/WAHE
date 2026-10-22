@@ -1558,17 +1558,9 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		#endif // WAHE_WASMTIME
 
 		#ifdef WAHE_WAMR
-		// Record WAMR's child-instance sharing requirements
+		// Record sharing requirements for memory allocated by WAMR from imports or definitions
 		ctx->type = WAHE_MODULE_WAMR;
 		ctx->thread_memory_safe = memory_info.shared && memory_info.maximum_present;
-
-		// Reject memory imports because WAMR's embedding API does not accept a host memory object
-		if (memory_info.imported)
-		{
-			fprintf_rl(stderr, "Module %s imports linear memory, which the WAMR embedding path cannot provide\n", ctx->module_name);
-			free_buf(&wasm_buf);
-			return;
-		}
 
 		// Preserve WAHE's fixed-address contract when WAMR grows linear memory
 		if (!memory_info.shared && (!memory_info.maximum_present || memory_info.max_pages != memory_info.base_pages))
