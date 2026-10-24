@@ -46,6 +46,57 @@ static void wahe_wait_after_execution_failure(void)
 	#endif
 }
 
+static void wahe_exit_after_module_failure(void)
+{
+	// Flush the original error before pausing or terminating the process
+	fflush(stdout);
+	fflush(stderr);
+
+	// Break into an attached debugger or keep an interactive console open for inspection
+	#ifdef _WIN32
+	if (IsDebuggerPresent())
+		DebugBreak();
+	else
+	{
+		// Wait for acknowledgment only when standard input is a Windows console
+		DWORD console_mode;
+		if (GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &console_mode))
+		{
+			fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
+			fflush(stderr);
+			int character;
+			do character = getchar(); while (character != '\n' && character != EOF);
+		}
+	}
+	#else
+	if (isatty(STDIN_FILENO))
+	{
+		// Wait for acknowledgment only when standard input is an interactive terminal
+		fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
+		fflush(stderr);
+		int character;
+		do character = getchar(); while (character != '\n' && character != EOF);
+	}
+	#endif
+
+	// Exit without running cleanup callbacks against partially initialized modules
+	_Exit(EXIT_FAILURE);
+}
+
+static void wahe_require_valid_module(wahe_module_t *ctx)
+{
+	// Stop all callers after the first thread discovers an invalid module
+	wahe_wait_after_execution_failure();
+	if (ctx && !ctx->valid)
+	{
+		// Let one thread report the failure while concurrent callbacks remain parked
+		if (!wahe_claim_execution_failure())
+			wahe_wait_after_execution_failure();
+		fprintf_rl(stderr, "Cannot execute invalid module %s\n", ctx->module_name ? ctx->module_name : "(unnamed)");
+		wahe_exit_after_module_failure();
+	}
+}
+
 const char *wahe_eo_name[] =
 {
 	"module_func",
@@ -68,6 +119,14 @@ const char *wahe_func_name[] =
 };
 
 _Thread_local wahe_chain_t *wahe_cur_chain = NULL;
+static _Thread_local wahe_module_t *wahe_cur_native_module;
+static _Thread_local size_t wahe_cur_native_runner_id;
+
+static size_t wahe_active_native_runner_id(wahe_module_t *ctx)
+{
+	// Route nested host allocations back through the active translated runner
+	return ctx && ctx == wahe_cur_native_module ? wahe_cur_native_runner_id : 0;
+}
 
 #ifdef WAHE_WASMTIME
 static _Thread_local wahe_wasmtime_runner_t *wahe_cur_wasmtime_runner = NULL;
@@ -143,8 +202,8 @@ static size_t wahe_active_runner_id(wahe_module_t *ctx)
 	if (ctx && ctx->type == WAHE_MODULE_WASMTIME && wahe_cur_wasmtime_runner && wahe_cur_wasmtime_runner->module == ctx)
 		return wahe_cur_wasmtime_runner->runner_id;
 
-	// Use runner zero for ordinary and native calls
-	return 0;
+	// Preserve the active translated runner during callbacks into the host
+	return wahe_active_native_runner_id(ctx);
 }
 
 static void fprint_wasmtime_error(wahe_module_t *ctx, wahe_wasmtime_runner_t *runner, wasmtime_error_t *error, wasm_trap_t *trap)
@@ -201,6 +260,10 @@ static size_t wasmtime_val_get_address(wasmtime_val_t val)
 #ifdef WAHE_WAMR
 static size_t wahe_active_runner_id(wahe_module_t *ctx)
 {
+	// Preserve the active translated runner during callbacks into the host
+	if (ctx && ctx == wahe_cur_native_module)
+		return wahe_cur_native_runner_id;
+
 	// Delegate active-runner selection to the WAMR callback context
 	return wahe_wamr_active_runner_id(ctx);
 }
@@ -444,7 +507,7 @@ size_t wahe_get_module_symbol_address(wahe_module_t *ctx, const char *symbol_nam
 	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
-	size_t runner_id = 0;
+	size_t runner_id = wahe_active_native_runner_id(ctx);
 	#endif
 	return wahe_get_module_symbol_address_on_runner(ctx, runner_id, symbol_name, verbosity);
 }
@@ -620,20 +683,15 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 		return 0;
 	}
 
-	// Reject calls into modules that did not initialise successfully
-	if (!ctx->valid)
-	{
-		static bool once = 1;
-		if (once) fprintf_rl(stderr, "Cannot call %s:%s() because the module is invalid\n", ctx->module_name, wahe_func_name[func_id]);
-		once = 0;
-		return 0;
-	}
+	// Stop before dispatching into a module that did not initialize successfully
+	wahe_require_valid_module(ctx);
 
 	// Native call
 	if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE || ctx->type == WAHE_MODULE_NATIVE)
 	{
-		// Native modules currently expose one directly callable instance
-		if (runner_id != 0)
+		// Reject unknown runners while retaining the single-runner native ABI
+		if (runner_id >= ctx->runner_count || (ctx->type == WAHE_MODULE_NATIVE && runner_id != 0) ||
+			(runner_id != 0 && ctx->wasm_decomp_runner == NULL))
 		{
 			fprintf_rl(stderr, "Cannot call native module %s with runner %zu\n", ctx->module_name, runner_id);
 			return 0;
@@ -646,8 +704,11 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 			return 0;
 		}
 
-		// Activate only the translated instance selected by this WAHE module
+		// Serialize each translated runner independently and preserve nested callback routing
 		void *previous_instance = NULL;
+		wahe_wasm_decomp_runner_t *native_runner = ctx->wasm_decomp_runner ? &ctx->wasm_decomp_runner[runner_id] : NULL;
+		wahe_module_t *previous_module = wahe_cur_native_module;
+		size_t previous_runner_id = wahe_cur_native_runner_id;
 		if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
 		{
 			if (ctx->wasm_decomp_instance == NULL || ctx->wasm_decomp_instance_enter == NULL || ctx->wasm_decomp_instance_leave == NULL)
@@ -655,7 +716,11 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 				fprintf_rl(stderr, "Cannot call %s:%s() without an initialized translated instance\n", ctx->module_name, wahe_func_name[func_id]);
 				return 0;
 			}
-			previous_instance = ctx->wasm_decomp_instance_enter(ctx->wasm_decomp_instance);
+			if (native_runner)
+				rl_mutex_lock(&native_runner->mutex);
+			previous_instance = ctx->wasm_decomp_instance_enter(native_runner ? native_runner->instance : ctx->wasm_decomp_instance);
+			wahe_cur_native_module = ctx;
+			wahe_cur_native_runner_id = runner_id;
 		}
 
 		// Dispatch through the native signature while the translated state is active
@@ -692,7 +757,13 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 
 		// Restore the translated state needed by a nested caller on this thread
 		if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
+		{
 			ctx->wasm_decomp_instance_leave(previous_instance);
+			wahe_cur_native_module = previous_module;
+			wahe_cur_native_runner_id = previous_runner_id;
+			if (native_runner)
+				rl_mutex_unlock(&native_runner->mutex);
+		}
 
 		return ret_val;
 	}
@@ -759,34 +830,7 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 			if (!first_failure)
 				wahe_wait_after_execution_failure();
 			ctx->valid = 0;
-			fflush(stdout);
-			fflush(stderr);
-			#ifdef _WIN32
-			if (IsDebuggerPresent())
-				DebugBreak();
-			else
-			{
-				// Keep an interactive console open until the failure has been inspected
-				DWORD console_mode;
-				if (GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &console_mode))
-				{
-					fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
-					fflush(stderr);
-					int character;
-					do character = getchar(); while (character != '\n' && character != EOF);
-				}
-			}
-			#else
-			// Keep an interactive terminal open until the failure has been inspected
-			if (isatty(STDIN_FILENO))
-			{
-				fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
-				fflush(stderr);
-				int character;
-				do character = getchar(); while (character != '\n' && character != EOF);
-			}
-			#endif
-			_Exit(EXIT_FAILURE);
+			wahe_exit_after_module_failure();
 		}
 
 		// Refresh the active extent after calls that may have grown memory
@@ -859,35 +903,7 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 		fprintf_rl(stderr, "Calling %s runner %zu:%s() failed\n", ctx->module_name, runner_id, wahe_func_name[func_id]);
 		fprint_wasmtime_error(ctx, runner, error, trap);
 		ctx->valid = 0;
-		// Preserve the first failure report before halting the execution chain
-		fflush(stdout);
-		fflush(stderr);
-		#ifdef _WIN32
-		if (IsDebuggerPresent())
-			DebugBreak();
-		else
-		{
-			// Keep an interactive console open until the failure has been inspected
-			DWORD console_mode;
-			if (GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &console_mode))
-			{
-				fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
-				fflush(stderr);
-				int character;
-				do character = getchar(); while (character != '\n' && character != EOF);
-			}
-		}
-		#else
-		// Keep an interactive terminal open until the failure has been inspected
-		if (isatty(STDIN_FILENO))
-		{
-			fprintf_rl(stderr, "WAHE stopped after a module failure. Press Enter to exit.\n");
-			fflush(stderr);
-			int character;
-			do character = getchar(); while (character != '\n' && character != EOF);
-		}
-		#endif
-		_Exit(EXIT_FAILURE);
+		wahe_exit_after_module_failure();
 	}
 
 	// Park successful in-flight calls before they continue into message handling
@@ -984,7 +1000,7 @@ size_t call_module_malloc(wahe_module_t *ctx, size_t size)
 	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
-	size_t runner_id = 0;
+	size_t runner_id = wahe_active_native_runner_id(ctx);
 	#endif
 	return call_module_malloc_on_runner(ctx, runner_id, size);
 }
@@ -995,7 +1011,7 @@ size_t call_module_realloc(wahe_module_t *ctx, size_t address, size_t size)
 	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
-	size_t runner_id = 0;
+	size_t runner_id = wahe_active_native_runner_id(ctx);
 	#endif
 	return call_module_realloc_on_runner(ctx, runner_id, address, size);
 }
@@ -1006,7 +1022,7 @@ void call_module_free(wahe_module_t *ctx, size_t address)
 	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
-	size_t runner_id = 0;
+	size_t runner_id = wahe_active_native_runner_id(ctx);
 	#endif
 	call_module_free_on_runner(ctx, runner_id, address);
 }
@@ -1017,7 +1033,7 @@ char *call_module_func(wahe_module_t *ctx, size_t message_addr, enum wahe_func_i
 	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
-	size_t runner_id = 0;
+	size_t runner_id = wahe_active_native_runner_id(ctx);
 	#endif
 	return call_module_func_on_runner(ctx, runner_id, message_addr, func_id, call_from_eo);
 }
@@ -1055,7 +1071,7 @@ size_t module_vsprintf_alloc(wahe_module_t *ctx, const char *format, va_list arg
 	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(ctx);
 	#else
-	size_t runner_id = 0;
+	size_t runner_id = wahe_active_native_runner_id(ctx);
 	#endif
 	return module_vsprintf_alloc_on_runner(ctx, runner_id, format, args);
 }
@@ -1389,7 +1405,77 @@ static int wahe_init_wasmtime_runner(wahe_module_t *ctx, wahe_wasmtime_runner_t 
 }
 #endif
 
-void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count)
+static int wahe_init_translated_runners(wahe_module_t *ctx)
+{
+	// Require shared memory and the runner ABI before allowing concurrent translated instances
+	void *(*create_runner)(void *) = dynlib_find_symbol(ctx->native, "wasm_decomp_instance_create_runner");
+	int8_t *shared_memory = dynlib_find_symbol(ctx->native, "wasm_decomp_memory_is_shared");
+	size_t stack_size = 0;
+	if (ctx->runner_count > 1)
+	{
+		if (create_runner == NULL || shared_memory == NULL || !*shared_memory)
+		{
+			fprintf_rl(stderr, "Translated module %s needs shared memory and the runner ABI for %zu runners; regenerate and rebuild its DLL\n", ctx->module_name, ctx->runner_count);
+			return 0;
+		}
+		if (ctx->stack_ptr_addr == NULL || ctx->stack_base == 0 || ctx->data_end < ctx->stack_base ||
+			ctx->stack_base % ctx->runner_count != 0)
+		{
+			fprintf_rl(stderr, "Translated module %s requires an exported, stack-first stack region divisible by %zu runners\n", ctx->module_name, ctx->runner_count);
+			return 0;
+		}
+		stack_size = ctx->stack_base / ctx->runner_count;
+		if (stack_size < 16 || stack_size % 16)
+		{
+			fprintf_rl(stderr, "Translated module %s runner stack size %#zx is not a positive multiple of 16 bytes\n", ctx->module_name, stack_size);
+			return 0;
+		}
+	}
+
+	// Allocate stable runner state sharing one linear memory without replaying data initialization
+	wahe_wasm_decomp_runner_t *runners = calloc(ctx->runner_count, sizeof(*runners));
+	if (runners == NULL)
+		return 0;
+	size_t initialized = 0;
+	size_t *stack_index = dynlib_find_symbol(ctx->native, "wasm_decomp_stack_pointer_global_index");
+	for (size_t i = 0; i < ctx->runner_count; i++)
+	{
+		runners[i].instance = i ? create_runner(ctx->wasm_decomp_instance) : ctx->wasm_decomp_instance;
+		if (runners[i].instance == NULL)
+			goto failed;
+		rl_mutex_init(&runners[i].mutex);
+		initialized++;
+		if (ctx->runner_count == 1)
+			continue;
+
+		// Assign each instance its own translated stack-pointer global and stack slice
+		void *stack_pointer = stack_index ? ctx->wasm_decomp_instance_global_address(runners[i].instance, *stack_index) : NULL;
+		if (stack_pointer == NULL)
+			goto failed;
+		size_t stack_top = stack_size * (i + 1);
+		if (ctx->memory_bits == 32)
+			*(uint32_t *) stack_pointer = stack_top;
+		else
+			*(uint64_t *) stack_pointer = stack_top;
+		fprintf_rl(stdout, "Module #%d %s runner %zu stack range %#zx - %#zx\n", ctx->module_id, ctx->module_name, i, stack_top-stack_size, stack_top);
+	}
+	ctx->wasm_decomp_runner = runners;
+	return 1;
+
+failed:
+	// Release partially initialized runners without destroying the primary module instance
+	for (size_t i = 0; i < initialized; i++)
+	{
+		if (i)
+			ctx->wasm_decomp_instance_destroy(runners[i].instance);
+		rl_mutex_destroy(&runners[i].mutex);
+	}
+	free(runners);
+	fprintf_rl(stderr, "Creating translated runners for module %s failed\n", ctx->module_name);
+	return 0;
+}
+
+static void wahe_module_init_internal(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count)
 {
 	memset(ctx, 0, sizeof(wahe_module_t));
 	rl_mutex_init(&ctx->mutex);
@@ -1466,7 +1552,11 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		//wasmtime_config_debug_info_set(config, true);
 		#ifdef WASMTIME_FEATURE_THREADS
 		if (memory_info.shared)
+		{
+			// Enable both Wasm thread instructions and engine allocation of shared memories
 			wasmtime_config_wasm_threads_set(config, true);
+			wasmtime_config_shared_memory_set(config, true);
+		}
 		#else
 		if (memory_info.shared)
 		{
@@ -1499,7 +1589,18 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 		// Create the store-independent shared memory imported by every runner
 		if (memory_info.shared)
 		{
-			wasm_memorytype_t *memory_type = wasmtime_memorytype_new(memory_info.base_pages, memory_info.maximum_present, memory_info.max_pages, memory_info.memory64, true);
+			// Create the memory type with standard 64 KiB pages and handle validation errors
+			wasm_memorytype_t *memory_type = NULL;
+			error = wasmtime_memorytype_new(memory_info.base_pages, memory_info.maximum_present,
+				memory_info.max_pages, memory_info.memory64, true, 16, &memory_type);
+			if (error)
+			{
+				fprintf_rl(stderr, "Error creating shared memory type for module %s\n", ctx->module_name);
+				fprint_wasmtime_error(ctx, NULL, error, NULL);
+				return;
+			}
+
+			// Allocate the shared memory and release its temporary type descriptor
 			error = wasmtime_sharedmemory_new(ctx->engine, memory_type, &ctx->shared_memory);
 			wasm_memorytype_delete(memory_type);
 			if (error)
@@ -1636,8 +1737,8 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 	// Native module
 	else if ((ctx->native = dynlib_open(path)))
 	{
-		// Reject multiple runners for module types without separate WebAssembly instances
-		if (ctx->runner_count != 1)
+		// Keep ordinary native DLLs single-runner while allowing translated shared-memory modules
+		if (ctx->runner_count != 1 && dynlib_find_symbol(ctx->native, "wasm_decomp_instance_create") == NULL)
 		{
 			fprintf_rl(stderr, "Native module %s cannot be initialized with %zu runners\n", ctx->module_name, ctx->runner_count);
 			return;
@@ -1649,6 +1750,15 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 
 		// Find functions from the native module
 		wahe_init_all_module_symbols(ctx);
+		if (!ctx->valid)
+			return;
+
+		// Create runner-local translated globals and split the linked stack before module execution
+		if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE && !wahe_init_translated_runners(ctx))
+		{
+			ctx->valid = 0;
+			return;
+		}
 
 		// Store the module's fixed memory address
 		if (!wahe_init_module_memory(ctx))
@@ -1693,21 +1803,25 @@ void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_
 
 }
 
+void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count)
+{
+	// Stop initialization before returning a failed module to the parser or host
+	wahe_wait_after_execution_failure();
+	wahe_module_init_internal(parent_group, module_index, ctx, path, runner_count);
+	if (!ctx->valid)
+	{
+		// Preserve the initialization diagnostic and halt before any dependent commands run
+		if (!wahe_claim_execution_failure())
+			wahe_wait_after_execution_failure();
+		wahe_exit_after_module_failure();
+	}
+}
+
 void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr)
 {
-	// Reject invalid source modules
-	if (src_module && src_module->valid == 0)
-	{
-		fprintf_rl(stderr, "Cannot copy %zu bytes from invalid module %s\n", copy_size, src_module->module_name);
-		return;
-	}
-
-	// Reject invalid destination modules
-	if (dst_module && dst_module->valid == 0)
-	{
-		fprintf_rl(stderr, "Cannot copy %zu bytes to invalid module %s\n", copy_size, dst_module->module_name);
-		return;
-	}
+	// Stop invalid module access while preserving null contexts for direct host addresses
+	wahe_require_valid_module(src_module);
+	wahe_require_valid_module(dst_module);
 
 	// Synchronize WebAssembly runtime sizes before validating module-relative ranges
 	wahe_refresh_module_memory_size(src_module);
@@ -1928,8 +2042,12 @@ size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, co
 	size_t message_len = 0, message_capacity = 0, allocation_size = 0;
 	size_t dst_message_addr = 0;
 
-	// Reject invalid source and destination metadata
-	if (dst_module == NULL || src_message == NULL || dst_module->valid == 0 || (src_module && src_module->valid == 0))
+	// Stop callbacks that try to transfer messages through invalid modules
+	wahe_require_valid_module(src_module);
+	wahe_require_valid_module(dst_module);
+
+	// Reject missing source and destination metadata
+	if (dst_module == NULL || src_message == NULL)
 	{
 		fprintf_rl(stderr, "Cannot transfer a message between modules %s and %s using source pointer %p\n",
 			src_module ? src_module->module_name : "(host)",
@@ -2179,7 +2297,7 @@ size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *
 	#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 	size_t runner_id = wahe_active_runner_id(dst_module);
 	#else
-	size_t runner_id = 0;
+	size_t runner_id = wahe_active_native_runner_id(dst_module);
 	#endif
 	return wahe_copy_message_between_modules_on_runner(src_module, src_message, dst_module, runner_id);
 }

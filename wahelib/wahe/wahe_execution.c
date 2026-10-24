@@ -37,6 +37,9 @@ char *wahe_execute_chain_from_module(wahe_chain_t *chain, const char *input_msg,
 		if (eo->type == WAHE_EO_MODULE_FUNC)
 		{
 			wahe_module_t *exec_module = &group->module[eo->module_id];
+
+			// Halt before preparing input for an invalid execution target
+			wahe_require_valid_module(exec_module);
 			wahe_module_t *src_module = NULL, *dst_module = NULL;
 			int input_transfer_failed = 0;
 

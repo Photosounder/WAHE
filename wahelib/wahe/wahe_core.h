@@ -42,6 +42,12 @@ typedef struct
 	size_t *memory_size_addr;
 } wahe_wasm_decomp_instance_info_t;
 
+typedef struct
+{
+	void *instance;
+	rl_mutex_t mutex;
+} wahe_wasm_decomp_runner_t;
+
 #ifdef WAHE_WASMTIME
 typedef struct
 {
@@ -119,6 +125,7 @@ struct wahe_module_t
 	// Specific to native modules
 	void *native, *dl_func[WAHE_FUNC_COUNT];
 	void *wasm_decomp_instance;
+	wahe_wasm_decomp_runner_t *wasm_decomp_runner;
 	void *(*wasm_decomp_instance_enter)(void *instance);
 	void (*wasm_decomp_instance_leave)(void *previous);
 	void (*wasm_decomp_instance_destroy)(void *instance);

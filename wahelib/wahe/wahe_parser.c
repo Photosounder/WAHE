@@ -444,6 +444,10 @@ void wahe_group_create_cita_index(wahe_group_t *group)
 
 void wahe_group_init(wahe_group_t *group)
 {
+	// Check every module before an Init command can start native callback producers
+	for (size_t i = 0; i < group->module_count; i++)
+		wahe_require_valid_module(&group->module[i]);
+
 	// Send an Init message to all modules
 	for (int i = 0; i < group->module_count; i++)
 		wahe_send_input(&group->module[i], "Init");
