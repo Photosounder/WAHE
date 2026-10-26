@@ -84,8 +84,17 @@ static enum wahe_host_cmd_result wahe_hcmd_shrink_memory(wahe_module_t *ctx, con
 	if (end == 0)
 		return WAHE_HOST_CMD_NOT_HANDLED;
 
-	// Ignore shrink requests for runtime-owned WebAssembly memory because it cannot shrink
-	if (ctx->type == WAHE_MODULE_WASMTIME || ctx->type == WAHE_MODULE_WAMR)
+	// Apply logical Wasmtime shrinkage synchronously without reclaiming shared backing here
+	if (ctx->type == WAHE_MODULE_WASMTIME)
+	{
+		#ifdef WAHE_WASMTIME
+		wahe_wasmtime_request_memory_shrink(ctx, shrink_size);
+		#endif
+		return WAHE_HOST_CMD_HANDLED;
+	}
+
+	// Leave WAMR memory unchanged because its embedding API has no shrink operation
+	if (ctx->type == WAHE_MODULE_WAMR)
 		return WAHE_HOST_CMD_HANDLED;
 
 	// Decommit only valid shrinkage within an existing reservation

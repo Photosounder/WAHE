@@ -64,6 +64,7 @@ typedef struct
 	void *thread_handle;
 	char *thread_reply;
 	int creating, joining;
+	size_t call_depth;
 } wahe_wasmtime_runner_t;
 #endif // WAHE_WASMTIME
 
@@ -108,6 +109,7 @@ struct wahe_module_t
 	size_t initial_runner_count, next_thread_id;
 	int thread_memory_safe, threads_stopping;
 	int memory_is_shared;
+	int memory_reclaim_pending;
 	wasmtime_valkind_t address_type;
 	#endif // WAHE_WASMTIME
 
@@ -239,6 +241,9 @@ extern void wahe_register_host_commands(wahe_group_t *group);
 extern void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count);
 extern void wahe_module_join_threads(wahe_module_t *ctx);
 extern size_t wahe_get_module_memory_size(wahe_module_t *ctx);
+// Call only after excluding all runners and host accesses to this module's memory
+// Returns 1 on success or no pending work, or 0 on failure with reclamation still pending
+extern int wahe_reclaim_module_memory(wahe_module_t *ctx);
 extern void wahe_copy_between_memories(wahe_module_t *src_module, size_t src_addr, size_t copy_size, wahe_module_t *dst_module, size_t dst_addr);
 extern size_t wahe_copy_message_between_modules_on_runner(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module, size_t dst_runner_id);
 extern size_t wahe_copy_message_between_modules(wahe_module_t *src_module, const char *src_message, wahe_module_t *dst_module);

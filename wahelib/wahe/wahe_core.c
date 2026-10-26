@@ -133,6 +133,54 @@ static _Thread_local wahe_wasmtime_runner_t *wahe_cur_wasmtime_runner = NULL;
 static wasmtime_val_t wasmtime_val_set_address(wahe_module_t *ctx, size_t address);
 static size_t wasmtime_val_get_address(wasmtime_val_t val);
 static int wahe_init_thread_tls(wahe_module_t *ctx, wahe_wasmtime_runner_t *runner);
+
+typedef wasmtime_error_t *(*wahe_wasmtime_memory_shrink_func_t)(wasmtime_context_t *, const wasmtime_memory_t *, uint64_t, uint64_t *);
+
+#if defined(WAHE_WASMTIME_HAS_MEMORY_SHRINK) && WAHE_WASMTIME_HAS_MEMORY_SHRINK
+WASM_API_EXTERN wasmtime_error_t *wasmtime_memory_shrink(wasmtime_context_t *, const wasmtime_memory_t *, uint64_t, uint64_t *);
+#elif !defined(WAHE_WASMTIME_HAS_MEMORY_SHRINK) && defined(_MSC_VER)
+extern wasmtime_error_t *wasmtime_memory_shrink(wasmtime_context_t *, const wasmtime_memory_t *, uint64_t, uint64_t *);
+
+wasmtime_error_t *wahe_wasmtime_memory_shrink_unavailable(wasmtime_context_t *store, const wasmtime_memory_t *memory, uint64_t new_size, uint64_t *prev_size)
+{
+	// Supply an uncalled fallback symbol when the linked Wasmtime library lacks shrinking
+	(void) store;
+	(void) memory;
+	(void) new_size;
+	(void) prev_size;
+	return NULL;
+}
+
+#ifdef _M_IX86
+#pragma comment(linker, "/alternatename:_wasmtime_memory_shrink=_wahe_wasmtime_memory_shrink_unavailable")
+#else
+#pragma comment(linker, "/alternatename:wasmtime_memory_shrink=wahe_wasmtime_memory_shrink_unavailable")
+#endif
+#elif !defined(WAHE_WASMTIME_HAS_MEMORY_SHRINK) && !defined(_WIN32) && defined(__GNUC__)
+extern wasmtime_error_t *wasmtime_memory_shrink(wasmtime_context_t *, const wasmtime_memory_t *, uint64_t, uint64_t *) __attribute__((weak));
+#endif
+
+static wahe_wasmtime_memory_shrink_func_t wahe_wasmtime_memory_shrink_function(void)
+{
+	// Allow static builds to explicitly enable the extension or disable it entirely
+	#ifdef WAHE_WASMTIME_HAS_MEMORY_SHRINK
+	#if WAHE_WASMTIME_HAS_MEMORY_SHRINK
+	return wasmtime_memory_shrink;
+	#else
+	return NULL;
+	#endif
+	#elif defined(_MSC_VER)
+	// Read the resolved address without assuming distinct function names have distinct addresses
+	wahe_wasmtime_memory_shrink_func_t volatile function = wasmtime_memory_shrink;
+	return function == wahe_wasmtime_memory_shrink_unavailable ? NULL : function;
+	#elif !defined(_WIN32) && defined(__GNUC__)
+	// Let an unresolved weak symbol disable the extension on older shared libraries
+	return wasmtime_memory_shrink;
+	#else
+	// Require explicit opt-in where optional symbols cannot be resolved safely
+	return NULL;
+	#endif
+}
 #endif
 
 void wahe_bench_point(const char *label, int depth)
@@ -370,32 +418,153 @@ static void wahe_refresh_module_memory_size(wahe_module_t *ctx)
 	#endif
 
 	#ifdef WAHE_WASMTIME
-	// Refresh only Wasmtime memories whose committed size can grow
+	// Refresh Wasmtime memory after either growth or host-requested shrinkage
 	if (ctx == NULL || ctx->type != WAHE_MODULE_WASMTIME)
 		return;
 
 	// Read the active size from the module's shared or ordinary memory
 	size_t current_size;
+	wahe_wasmtime_runner_t *runner = NULL;
 	if (ctx->shared_memory)
-		current_size = wasmtime_sharedmemory_data_size(ctx->shared_memory);
+		current_size = 0;
 	else
 	{
-		wahe_wasmtime_runner_t *runner = wahe_get_wasmtime_runner(ctx, 0, "refresh module memory size");
+		// Serialize store access and keep its size sample valid through the cache update
+		runner = wahe_get_wasmtime_runner(ctx, 0, "refresh module memory size");
 		if (runner == NULL)
 			return;
+		rl_mutex_lock(&runner->mutex);
 		current_size = wasmtime_memory_data_size(runner->context, &runner->memory);
 	}
 
 	// Serialize reporting and updating the common module size
 	rl_mutex_lock(&ctx->mutex);
-	if (current_size > ctx->memory_size)
+	// Sample shared memory after acquiring the cache lock so stale samples cannot overwrite newer ones
+	if (ctx->shared_memory)
+		current_size = wasmtime_sharedmemory_data_size(ctx->shared_memory);
+	if (current_size != ctx->memory_size)
 	{
-		fprintf_rl(stdout, "Memory of module #%d %s grew from %zu kB to %zu kB\n", ctx->module_id, ctx->module_name, ctx->memory_size >> 10, current_size >> 10);
+		fprintf_rl(stdout, "Memory of module #%d %s %s from %zu kB to %zu kB\n", ctx->module_id, ctx->module_name,
+			current_size > ctx->memory_size ? "grew" : "shrank", ctx->memory_size >> 10, current_size >> 10);
 		ctx->memory_size = current_size;
 	}
 	rl_mutex_unlock(&ctx->mutex);
+	// Release the ordinary memory's store after publishing its current size
+	if (runner)
+		rl_mutex_unlock(&runner->mutex);
 	#else
 	(void) ctx;
+	#endif
+}
+
+#ifdef WAHE_WASMTIME
+static void wahe_wasmtime_request_memory_shrink(wahe_module_t *ctx, size_t shrink_size)
+{
+	// Resolve the runner while the guest still holds CIT Alloc's allocator lock
+	wahe_wasmtime_runner_t *runner = wahe_get_wasmtime_runner(ctx, wahe_active_runner_id(ctx), "shrink module memory");
+	if (runner == NULL)
+		return;
+	rl_mutex_lock(&runner->mutex);
+
+	// Ignore requests made before the module's linear memory has been initialized
+	if (!ctx->shared_memory && !runner->memory.store_id)
+	{
+		rl_mutex_unlock(&runner->mutex);
+		return;
+	}
+
+	// Derive the absolute page target and preserve the module's declared minimum
+	size_t current_size = ctx->shared_memory ? wasmtime_sharedmemory_data_size(ctx->shared_memory) :
+		wasmtime_memory_data_size(runner->context, &runner->memory);
+	uint64_t current_pages = ctx->shared_memory ? wasmtime_sharedmemory_size(ctx->shared_memory) :
+		wasmtime_memory_size(runner->context, &runner->memory);
+	if (shrink_size > current_size)
+		fprintf_rl(stderr, "Shrinking virtual memory of module %s to %zu bytes would enlarge its committed area\n", ctx->module_name, shrink_size);
+	else if (current_pages)
+	{
+		uint64_t page_size = current_size / current_pages;
+		uint64_t target_pages = shrink_size / page_size + (shrink_size % page_size != 0);
+		if (target_pages < ctx->page_count_initial)
+			target_pages = ctx->page_count_initial;
+		uint64_t previous_pages;
+		wasmtime_error_t *error = NULL;
+
+		// Publish logical shrinkage before the allocator can reuse the tail without memory.grow
+		#ifdef WASMTIME_MEMORY_SHRINK_COORDINATED
+		if (ctx->shared_memory)
+		{
+			error = wasmtime_sharedmemory_shrink(ctx->shared_memory, target_pages, &previous_pages);
+			if (error == NULL)
+			{
+				// Retain backing until the host establishes a safe reclamation point
+				rl_mutex_lock(&ctx->mutex);
+				ctx->memory_reclaim_pending = 1;
+				rl_mutex_unlock(&ctx->mutex);
+			}
+		}
+		else
+			error = wasmtime_memory_shrink_coordinated(runner->context, &runner->memory, target_pages, &previous_pages);
+		#else
+		// Older runtimes cannot safely apply a guest callback request after subsequent allocations
+		wahe_wasmtime_memory_shrink_func_t shrink = wahe_wasmtime_memory_shrink_function();
+		if (!ctx->shared_memory && !runner->call_depth && shrink)
+			error = shrink(runner->context, &runner->memory, target_pages, &previous_pages);
+		#endif
+
+		// Report failure without allowing a stale request to survive beyond this callback
+		if (error)
+		{
+			fprintf_rl(stderr, "Shrinking Wasmtime memory of module %s to %" PRIu64 " pages failed\n", ctx->module_name, target_pages);
+			fprint_wasmtime_error(ctx, runner, error, NULL);
+		}
+	}
+
+	// Refresh the cached extent after the synchronous operation has completed
+	wahe_refresh_module_memory_size(ctx);
+	rl_mutex_unlock(&runner->mutex);
+}
+#endif // WAHE_WASMTIME
+
+int wahe_reclaim_module_memory(wahe_module_t *ctx)
+{
+	#if defined(WAHE_WASMTIME) && defined(WASMTIME_MEMORY_SHRINK_COORDINATED)
+	// Accept memories whose backing is not managed by the shared-memory shrink extension
+	if (ctx == NULL || ctx->type != WAHE_MODULE_WASMTIME || ctx->shared_memory == NULL)
+		return 1;
+
+	// Reject reclamation from this module's callback because its Wasm call is still live
+	if (wahe_cur_wasmtime_runner && wahe_cur_wasmtime_runner->module == ctx)
+	{
+		fprintf_rl(stderr, "Cannot reclaim shared memory of module %s from its active runner\n", ctx->module_name);
+		return 0;
+	}
+
+	// Serialize pending work after the caller has excluded all runners and host memory users
+	rl_mutex_lock(&ctx->mutex);
+	if (!ctx->memory_reclaim_pending)
+	{
+		rl_mutex_unlock(&ctx->mutex);
+		return 1;
+	}
+
+	// Recompute the unused tail inside Wasmtime rather than retaining an obsolete absolute target
+	wasmtime_error_t *error = wasmtime_sharedmemory_reclaim(ctx->shared_memory);
+	if (error == NULL)
+		ctx->memory_reclaim_pending = 0;
+	rl_mutex_unlock(&ctx->mutex);
+
+	// Keep failed reclamation pending so the host can retry at a later safe point
+	if (error)
+	{
+		fprintf_rl(stderr, "Reclaiming shared memory backing of module %s failed\n", ctx->module_name);
+		fprint_wasmtime_error(ctx, NULL, error, NULL);
+		return 0;
+	}
+	return 1;
+	#else
+	// Preserve a no-op maintenance API for older Wasmtime, WAMR and native-only builds
+	(void) ctx;
+	return 1;
 	#endif
 }
 
@@ -884,9 +1053,12 @@ static size_t call_module_func_core_on_runner(wahe_module_t *ctx, size_t runner_
 	// Recheck after waiting for another call on the same runner
 	wahe_wait_after_execution_failure();
 	wahe_cur_wasmtime_runner = runner;
+	runner->call_depth++;
 	error = wasmtime_func_call(runner->context, &runner->func[func_id], param, arg_count, ret, func_id != WAHE_FUNC_FREE, &trap);
 	// Publish failure before another waiting call can enter this runner
 	int first_failure = (error || trap) ? wahe_claim_execution_failure() : 0;
+	// End the call without applying any deferred allocator target
+	runner->call_depth--;
 	wahe_cur_wasmtime_runner = prev_runner;
 	rl_mutex_unlock(&runner->mutex);
 
@@ -1549,6 +1721,10 @@ static void wahe_module_init_internal(wahe_group_t *parent_group, int module_ind
 
 		// Configure the engine for the Wasm threads proposal when needed
 		wasm_config_t *config = wasm_config_new();
+		#ifdef WASMTIME_MEMORY_SHRINK_COORDINATED
+		// Enable synchronous allocator callbacks and explicit bounds checks for retained shared pages
+		wasmtime_config_shared_memory_shrink_set(config, true);
+		#endif
 		//wasmtime_config_debug_info_set(config, true);
 		#ifdef WASMTIME_FEATURE_THREADS
 		if (memory_info.shared)
