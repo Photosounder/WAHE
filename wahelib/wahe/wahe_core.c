@@ -2629,7 +2629,15 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 
 				// Transfer any response back into the original calling module
 				if (ret_msg)
+				{
 					return_msg_addr = wahe_copy_message_between_modules(registered_module, ret_msg, ctx);
+
+					// Release the original response through its owner's allocator even if copying failed
+					size_t response_addr = (size_t) ret_msg;
+					if (registered_module->type != WAHE_MODULE_NATIVE)
+						response_addr -= (size_t) registered_module->memory_ptr;
+					call_module_free(registered_module, response_addr);
+				}
 				return return_msg_addr;
 			}
 
