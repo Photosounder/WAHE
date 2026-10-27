@@ -1,3 +1,80 @@
+== Message ownership
+
+Messages returned by exported module callbacks are borrowed. WAHE never frees these original return messages, whether they come from a registered command, command processor or execution chain. The producing module manages their storage and must keep the message and any referenced payloads valid until consumers have finished with them. A non-null return pointer does not imply a heap allocation; static, thread-local and reusable module-owned buffers are supported. Returned messages must not use the host-created input allocation, which WAHE frees after the callback returns.
+
+Ordinary textual replies returned to a module by `wahe_run_command()` are different: WAHE allocates the reply, or a copy of the responding module's borrowed message, through the calling module's allocator. The caller owns that allocation and must free it with its own allocator. WAHE continues to free temporary input copies and failed transfer allocations that it creates. Referenced audio/image/data buffers retain their separate ownership and lifetime; native recipients can access them directly without copying the payload.
+
+In short:
+
+* Callback input: borrow it during the call; do not free it or keep a pointer into it.
+* Callback return: the producing module owns it; wahelib does not free it.
+* `wahe_run_command()` text reply: the calling module owns the copy; consume it and call its own `free()` exactly once. `free(NULL)` is fine.
+* Referenced payload: follow the payload's separate lifetime. Freeing the message does not normally free the image, audio or file data it describes. If wahelib packs a payload into the caller's response allocation, consume that payload before freeing the response and do not free the interior payload pointer separately.
+
+These rules are the same for native, Wasmtime, WAMR and transpiled modules. Host-memory access avoids unnecessary payload copies; it does not make allocators interchangeable. A module's exported `module_malloc()`, `module_realloc()` and `module_free()` must use the same allocator as the module's own allocation functions.
+
+=== Asking another module for a value
+
+The command reply is a new allocation belonging to the caller, even if the provider originally returned a static string. Read it before freeing it:
+
+[source,c]
+----
+double read_host_time(void)
+{
+    // Parse the owned reply before releasing it with this module's allocator
+    double seconds = NAN;
+    char *reply = wahe_run_command("Get raw time");
+    if (reply)
+        sscanf(reply, "Raw time %lg seconds", &seconds);
+    free(reply);
+    return seconds;
+}
+----
+
+If the reply is not needed, release it directly: `free(wahe_run_command("Mouse grab"));`. Do not assume a normally silent command can never return an allocated error message.
+
+=== Handling a command
+
+The handler does not free the input; wahelib frees its temporary input copy after the call. A string literal is a valid borrowed result and must not be freed:
+
+[source,c]
+----
+EXPORT("module_message_input")
+char *module_message_input(char *message)
+{
+    // Inspect the borrowed input without freeing or retaining it
+    if (message && strcmp(message, "Get status") == 0)
+        return "Ready";
+    return NULL;
+}
+----
+
+If the handler needs to remember an input value, allocate and retain its own copy of that value; release the saved copy on replacement or `Deinit`. Never return a stack-local array or a pointer into the borrowed input. A static or thread-local result buffer must remain valid until consumption is complete; callers must not keep it across calls that can overwrite it. Modules used concurrently must protect result storage or provide independent storage per invocation/thread.
+
+=== Forwarding a command from a command processor
+
+`module_proc_cmd()` also returns a borrowed result. A processor forwarding an owned `wahe_run_command()` reply must manage that allocation itself. This simple example assumes serialized, non-reentrant calls:
+
+[source,c]
+----
+static char *processor_reply;
+
+EXPORT("module_proc_cmd")
+char *module_proc_cmd(char *command)
+{
+    // Replace the previous module-owned result after its consumer has finished
+    free(processor_reply);
+    processor_reply = wahe_run_command(command);
+    return processor_reply;
+}
+----
+
+Release and clear `processor_reply` during `Deinit` as well. Do not free it immediately before returning it, and do not rely on wahelib to free it afterward. Framebuffer and audio descriptors may similarly use reusable module-owned text and payload buffers as long as their lifetimes cover consumption.
+
+`Init memory` is a special low-level command: its result is a virtual-memory base address, not an allocated text reply. Do not apply the text-reply `free()` rule to that address. Similarly, `Load raw file` returns an owned text descriptor describing a separate data allocation; the caller must manage both allocations according to their respective lifetimes.
+
+The ownership regression test can be run with `bash tests/run_message_ownership.sh`. It checks borrowed callback results, caller-owned command copies, temporary-input cleanup, different module allocators, command processors and execution chains. On Windows, an optional miniaudio DLL path also checks a real borrowed native response without starting an audio device or opening a window.
+
 == Selecting a WebAssembly runtime
 
 Define `WAHE_WASMTIME` to build the Wasmtime backend or `WAHE_WAMR` to build the WAMR backend. The two definitions are mutually exclusive. A WAMR build must make `wasm_export.h` available and link the WAMR runtime library.

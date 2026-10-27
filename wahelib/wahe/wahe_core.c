@@ -1220,9 +1220,12 @@ static size_t module_vsprintf_alloc_on_runner(wahe_module_t *ctx, size_t runner_
 	// Allocate the message through the selected runner
 	size_t addr = call_module_malloc_on_runner(ctx, runner_id, len+1);
 
-	// Print
+	// Format into an absolute native allocation or a Wasm linear-memory allocation as appropriate
 	if (addr)
-		vsnprintf(&ctx->memory_ptr[addr], len+1, format, args);
+	{
+		char *message = ctx->type == WAHE_MODULE_NATIVE ? (char *) addr : (char *) &ctx->memory_ptr[addr];
+		vsnprintf(message, len+1, format, args);
+	}
 
 	return addr;
 }
@@ -2580,14 +2583,8 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 			// Copy and return the return message
 			if (return_msg_dst)
 			{
-				// Transfer the processed message and its described payloads back to the caller
+				// Copy the borrowed processor response without releasing storage owned by that module
 				return_msg_addr = wahe_copy_message_between_modules(dst_module, return_msg_dst, ctx);
-
-				// Free the command processor's returned allocation after copying it
-				size_t return_msg_addr_dst = (size_t) return_msg_dst;
-				if (dst_module->type != WAHE_MODULE_NATIVE)
-					return_msg_addr_dst -= (size_t) dst_module->memory_ptr;
-				call_module_free(dst_module, return_msg_addr_dst);
 				return return_msg_addr;
 			}
 			else
@@ -2621,28 +2618,35 @@ size_t wahe_run_command_core(wahe_module_t *ctx, char *message)
 				wahe_module_t *registered_module = &group->module[reg->module_id];
 				size_t registered_msg_addr = wahe_copy_message_between_modules(ctx, line, registered_module);
 				if (registered_msg_addr == 0)
+				{
+					// Release an earlier owned reply when input transfer aborts the command
+					if (return_msg_addr)
+						call_module_free(ctx, return_msg_addr);
 					return 0;
+				}
 
 				// Call the registered module and release its combined input allocation
 				char *ret_msg = call_module_func(registered_module, registered_msg_addr, WAHE_FUNC_INPUT, 0);
 				call_module_free(registered_module, registered_msg_addr);
 
-				// Transfer any response back into the original calling module
+				// Copy the borrowed response into caller-owned storage and leave the original with its module
 				if (ret_msg)
 				{
-					return_msg_addr = wahe_copy_message_between_modules(registered_module, ret_msg, ctx);
-
-					// Release the original response through its owner's allocator even if copying failed
-					size_t response_addr = (size_t) ret_msg;
-					if (registered_module->type != WAHE_MODULE_NATIVE)
-						response_addr -= (size_t) registered_module->memory_ptr;
-					call_module_free(registered_module, response_addr);
+					size_t response_copy = wahe_copy_message_between_modules(registered_module, ret_msg, ctx);
+					// Release any earlier owned reply that this response replaces, including on copy failure
+					if (return_msg_addr)
+						call_module_free(ctx, return_msg_addr);
+					return_msg_addr = response_copy;
 				}
 				return return_msg_addr;
 			}
 
 			// Run host commands with the issuing module as their caller context
+			size_t previous_reply = return_msg_addr;
 			enum wahe_host_cmd_result result = reg->host_func(ctx, &line, &return_msg_addr);
+			// Free superseded text replies but never the new result, which may be an Init memory reservation
+			if (previous_reply && previous_reply != return_msg_addr)
+				call_module_free(ctx, previous_reply);
 			if (result == WAHE_HOST_CMD_RETURN)
 				return return_msg_addr;
 			if (result == WAHE_HOST_CMD_HANDLED)
