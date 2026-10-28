@@ -12,6 +12,7 @@
 #endif
 
 #include "wahe/wahe_wamr.c"
+#include "wahe/wahe_wasm2native.c"
 #include "wahe/wahe_core.c"
 #include "wahe/wahe_threads.c"
 #include "wahe/wahe_host_commands.c"

@@ -814,6 +814,21 @@ void wahe_init_all_module_symbols(wahe_module_t *ctx)
 				if (addr)
 					ctx->data_end = ctx->memory_bits == 32 ? *(uint32_t *) addr : *(uint64_t *) addr;
 			}
+
+			// Run the reactor initialisation, such as C++ static constructors, once like Wasmtime does when instantiating
+			void (*reactor_initialize)(void) = dynlib_find_symbol(ctx->native, "_initialize");
+			if (reactor_initialize)
+			{
+				wahe_module_t *previous_module = wahe_cur_native_module;
+				size_t previous_runner_id = wahe_cur_native_runner_id;
+				void *previous_instance = ctx->wasm_decomp_instance_enter(ctx->wasm_decomp_instance);
+				wahe_cur_native_module = ctx;
+				wahe_cur_native_runner_id = 0;
+				reactor_initialize();
+				ctx->wasm_decomp_instance_leave(previous_instance);
+				wahe_cur_native_module = previous_module;
+				wahe_cur_native_runner_id = previous_runner_id;
+			}
 		}
 	}
 	else if (ctx->type == WAHE_MODULE_WASMTIME || ctx->type == WAHE_MODULE_WAMR)
@@ -1580,6 +1595,49 @@ static int wahe_init_wasmtime_runner(wahe_module_t *ctx, wahe_wasmtime_runner_t 
 }
 #endif
 
+static int wahe_init_translated_tls(wahe_module_t *ctx, size_t runner_id, int required, size_t *tls_alloc)
+{
+	// Read LLVM's TLS layout from the constants exported by the translated module
+	*tls_alloc = 0;
+	void *size_ptr = dynlib_find_symbol(ctx->native, "__tls_size");
+	void *align_ptr = dynlib_find_symbol(ctx->native, "__tls_align");
+	void *init_tls = dynlib_find_symbol(ctx->native, "__wasm_init_tls");
+	if (size_ptr == NULL)
+		return !required;
+	size_t size = ctx->memory_bits == 32 ? *(uint32_t *) size_ptr : *(uint64_t *) size_ptr;
+	if (size == 0)
+		return 1;
+	if (align_ptr == NULL || init_tls == NULL)
+		return 0;
+	size_t align = ctx->memory_bits == 32 ? *(uint32_t *) align_ptr : *(uint64_t *) align_ptr;
+	if (align == 0 || (align & (align-1)) || size > SIZE_MAX - align)
+		return 0;
+
+	// Allocate an aligned block on the module heap through the calling runner
+	*tls_alloc = call_module_malloc(ctx, size + align-1);
+	if (*tls_alloc == 0)
+		return 0;
+	size_t tls_addr = (*tls_alloc + align-1) & ~(align-1);
+
+	// Set the runner's private TLS base by running __wasm_init_tls in its instance
+	wahe_wasm_decomp_runner_t *runner = &ctx->wasm_decomp_runner[runner_id];
+	wahe_module_t *previous_module = wahe_cur_native_module;
+	size_t previous_runner_id = wahe_cur_native_runner_id;
+	rl_mutex_lock(&runner->mutex);
+	void *previous_instance = ctx->wasm_decomp_instance_enter(runner->instance);
+	wahe_cur_native_module = ctx;
+	wahe_cur_native_runner_id = runner_id;
+	if (ctx->memory_bits == 32)
+		((void (*)(int32_t)) init_tls)((int32_t) tls_addr);
+	else
+		((void (*)(int64_t)) init_tls)((int64_t) tls_addr);
+	ctx->wasm_decomp_instance_leave(previous_instance);
+	wahe_cur_native_module = previous_module;
+	wahe_cur_native_runner_id = previous_runner_id;
+	rl_mutex_unlock(&runner->mutex);
+	return 1;
+}
+
 static int wahe_init_translated_runners(wahe_module_t *ctx)
 {
 	// Require shared memory and the runner ABI before allowing concurrent translated instances
@@ -1607,8 +1665,9 @@ static int wahe_init_translated_runners(wahe_module_t *ctx)
 		}
 	}
 
-	// Allocate stable runner state sharing one linear memory without replaying data initialization
-	wahe_wasm_decomp_runner_t *runners = calloc(ctx->runner_count, sizeof(*runners));
+	// Allocate stable runner state sharing one linear memory without replaying data initialization, with room for later threads so that runners never move
+	size_t capacity = ctx->runner_count + WAHE_TRANSLATED_MAX_THREADS;
+	wahe_wasm_decomp_runner_t *runners = calloc(capacity, sizeof(*runners));
 	if (runners == NULL)
 		return 0;
 	size_t initialized = 0;
@@ -1619,6 +1678,9 @@ static int wahe_init_translated_runners(wahe_module_t *ctx)
 		if (runners[i].instance == NULL)
 			goto failed;
 		rl_mutex_init(&runners[i].mutex);
+		runners[i].mutex_initialized = runners[i].in_use = 1;
+		runners[i].module = ctx;
+		runners[i].runner_id = i;
 		initialized++;
 		if (ctx->runner_count == 1)
 			continue;
@@ -1635,6 +1697,18 @@ static int wahe_init_translated_runners(wahe_module_t *ctx)
 		fprintf_rl(stdout, "Module #%d %s runner %zu stack range %#zx - %#zx\n", ctx->module_id, ctx->module_name, i, stack_top-stack_size, stack_top);
 	}
 	ctx->wasm_decomp_runner = runners;
+	ctx->decomp_runner_capacity = capacity;
+	ctx->decomp_initial_runner_count = ctx->runner_count;
+	ctx->decomp_next_thread_id = 1;
+
+	// Give the additional configured runners their own TLS blocks before their first C calls
+	for (size_t i = 1; i < ctx->runner_count; i++)
+		if (!wahe_init_translated_tls(ctx, i, 0, &runners[i].tls_alloc))
+		{
+			fprintf_rl(stderr, "Initialising the TLS of runner %zu of translated module %s failed\n", i, ctx->module_name);
+			ctx->wasm_decomp_runner = NULL;
+			goto failed;
+		}
 	return 1;
 
 failed:
@@ -1650,7 +1724,7 @@ failed:
 	return 0;
 }
 
-static void wahe_module_init_internal(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count)
+static void wahe_module_init_internal(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count, enum wahe_module_backend backend)
 {
 	memset(ctx, 0, sizeof(wahe_module_t));
 	rl_mutex_init(&ctx->mutex);
@@ -1667,8 +1741,14 @@ static void wahe_module_init_internal(wahe_group_t *parent_group, int module_ind
 	ctx->next_thread_id = 1;
 	#endif
 
-	// WASM module
+	// Load the native translation of a Wasm module instead when there is one to use, keeping the original module name
 	if (check_if_file_is_wasm(path))
+		ctx->native_translation_path = wahe_wasm2native_resolve(ctx, path, backend);
+	if (ctx->native_translation_path)
+		path = ctx->native_translation_path;
+
+	// WASM module
+	if (ctx->native_translation_path == NULL && check_if_file_is_wasm(path))
 	{
 		#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 		// Load WASM file
@@ -1984,9 +2064,14 @@ static void wahe_module_init_internal(wahe_group_t *parent_group, int module_ind
 
 void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count)
 {
+	wahe_module_init_with_backend(parent_group, module_index, ctx, path, runner_count, WAHE_BACKEND_DEFAULT);
+}
+
+void wahe_module_init_with_backend(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count, enum wahe_module_backend backend)
+{
 	// Stop initialization before returning a failed module to the parser or host
 	wahe_wait_after_execution_failure();
-	wahe_module_init_internal(parent_group, module_index, ctx, path, runner_count);
+	wahe_module_init_internal(parent_group, module_index, ctx, path, runner_count, backend);
 	if (!ctx->valid)
 	{
 		// Preserve the initialization diagnostic and halt before any dependent commands run
@@ -2079,8 +2164,13 @@ static int wahe_measure_transfer_message(wahe_module_t *src_module, const char *
 			return 1;
 		}
 
+		// Messages from the runtime part of a translated module, such as its trap reports, are host strings outside its whole reservation, which Wasm addresses can't reach
+		uintptr_t translated_reach = (uintptr_t) MAXN(src_module->memory_reserve_size, ((size_t) 1 << 33) + 65536);
+		int translated_runtime_message = src_module->type == WAHE_MODULE_WASM_TO_NATIVE && src_module->memory_bits == 32 &&
+			(message_start < memory_start || message_start - memory_start >= translated_reach);
+
 		// Reject out-of-memory pointers from modules that cannot access host memory
-		if (!src_module->has_host_mem_access)
+		if (!src_module->has_host_mem_access && !translated_runtime_message)
 		{
 			fprintf_rl(stderr, "Cannot transfer message pointer %p outside module %s's %zu-byte active memory\n",
 				(const void *) src_message, src_module->module_name, memory_size);

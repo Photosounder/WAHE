@@ -97,4 +97,19 @@ Multiple runners additionally require bounded shared memory, a stack-first modul
 
 `WAHE_WAMR_MAX_THREADS` sets WAMR's process-wide runner limit and defaults to 64. `WAHE_WAMR_NATIVE_STACK_SIZE` sets each execution environment's native stack and defaults to 64 KiB. `WAHE_WAMR_APP_HEAP_SIZE` can override the application heap reserved for auxiliary stacks; zero selects an automatic size based on the linked Wasm stack and runner limit.
 
+== Native translation of Wasm modules
+
+Define `WAHE_WASM2NATIVE` to let wahelib run Wasm modules as native DLLs made by `wasm2native.dll`, which decompiles a module to C, compiles it with an embedded Clang and links it with an embedded LLD. wahelib loads `wasm2native.dll` dynamically on first use, so a host can ship without it and keep using its WebAssembly runtime. The translations are cached in `<appdata>/WAHE/native_cache` as `<module name>_<modification date>_<content hash>_<build settings hash>.dll`. They are found again by name and hashes only, so a module rebuilt into an identical binary keeps its translation, while a change to its content, the wasm2native version or the CPU makes a new one. A translated module runs about twice as fast as under Wasmtime, but it is a weaker sandbox: a trap prints a message and lets the module continue, and a native stack overflow or translation bug can take the host down.
+
+The host-wide mode is set with `wahe_wasm2native_set_mode()` (the WAHE host lite takes `--native=MODE`), or else read from the `WAHE_WASM2NATIVE` environment variable:
+
+* `off`: always use the WebAssembly runtime.
+* `cached`: use a translation that was already built, never build one.
+* `auto` (default): use a cached translation, otherwise run the module in the WebAssembly runtime and build the translation on a low-priority background thread for the next launch.
+* `always`: use the translation, building it before the module starts if needed.
+
+A `.wahe` Module line can override the mode for one module with `, native` (translate, waiting for the build if needed) or `, sandboxed` (always use the WebAssembly runtime), for instance `Module Spiral: "spiral32.wasm", runners 2, native`. Translated 64-bit memory modules can access host memory, so they stay in the WebAssembly runtime unless their Module line has `, native`. A host built without a WebAssembly runtime translates every Wasm module, waiting for the builds, unless the mode is `off`.
+
+Translated modules with shared memory support `Create thread with`, `Join thread ID` and `Get thread ID` like Wasmtime modules, each thread getting its own translated instance with its own globals, a stack and a TLS block allocated on the module heap (which needs `__tls_size`, `__tls_align` and `__wasm_init_tls` to be exported). Up to `WAHE_TRANSLATED_MAX_THREADS` (256 by default) threads can exist at once besides the configured runners. Unlike Wasmtime, active data segments don't prevent threads, since a translated module applies them once when its memory is created. `tests/threads/host_translated.c` runs the thread tests on translations.
+
 When linking a standalone Windows host with the MSYS2 UCRT64 toolchain, pass `-static` on the final compiler link command to avoid a runtime dependency on MSYS2 DLLs such as `libwinpthread-1.dll`. The resulting executable still uses Windows system and UCRT API-set DLLs. Alternatively, distribute every imported MinGW runtime DLL beside the executable.

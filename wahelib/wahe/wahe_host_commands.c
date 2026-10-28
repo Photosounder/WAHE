@@ -463,15 +463,20 @@ static enum wahe_host_cmd_result wahe_hcmd_thread_create(wahe_module_t *ctx, con
 			failure = "stack size must be positive and representable in whole bytes";
 			if (isfinite(bytes) && bytes > 0. && bytes < (double) SIZE_MAX && bytes == floor(bytes))
 			{
-				// Pass the remaining text verbatim to the new worker
-				#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
+				// Pass the remaining text verbatim to the new worker, translated modules having their own threads
 				const char *message = *line + end;
 				if (*message == '\n')
 					message++;
-				id = wahe_create_module_thread(ctx, (size_t) bytes, message, &failure);
-				#else
-				failure = "host was built without WebAssembly thread support";
-				#endif
+				if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
+					id = wahe_create_translated_thread(ctx, (size_t) bytes, message, &failure);
+				else
+				{
+					#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
+					id = wahe_create_module_thread(ctx, (size_t) bytes, message, &failure);
+					#else
+					failure = "host was built without WebAssembly thread support";
+					#endif
+				}
 			}
 		}
 	}
@@ -491,6 +496,9 @@ static enum wahe_host_cmd_result wahe_hcmd_thread_join(wahe_module_t *ctx, const
 	if (end && wahe_hcmd_ends_at(*line, end))
 	{
 		// Reject native callers without accessing a WebAssembly runner registry
+		if (ctx->type == WAHE_MODULE_WASM_TO_NATIVE)
+			joined = wahe_join_translated_thread(ctx, id, &reply, &failure);
+		else
 		#if defined(WAHE_WASMTIME) || defined(WAHE_WAMR)
 		if (ctx->type == WAHE_MODULE_WASMTIME || ctx->type == WAHE_MODULE_WAMR)
 			joined = wahe_join_module_thread(ctx, id, &reply, &failure);
@@ -511,7 +519,7 @@ static enum wahe_host_cmd_result wahe_hcmd_get_thread_id(wahe_module_t *ctx, con
 	// Distinguish dynamically created workers from the module's original runners
 	if (!wahe_hcmd_ends_at(*line, sizeof("Get thread ID")-1))
 		return WAHE_HOST_CMD_NOT_HANDLED;
-	size_t id = 0;
+	size_t id = wahe_translated_thread_id(ctx);
 	#ifdef WAHE_WASMTIME
 	if (wahe_cur_wasmtime_runner && wahe_cur_wasmtime_runner->module == ctx)
 		id = wahe_cur_wasmtime_runner->thread_id;

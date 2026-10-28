@@ -550,8 +550,282 @@ static int wahe_join_module_thread(wahe_module_t *ctx, size_t id, char **reply, 
 }
 #endif
 
+// Threads of translated (wasm-to-native) modules, each running in its own translated instance sharing the module's memory
+
+static void wahe_delete_translated_thread(wahe_module_t *ctx, wahe_wasm_decomp_runner_t *runner)
+{
+	// Free guest allocations on the calling runner after the worker has stopped
+	if (runner->input_addr)
+		call_module_free(ctx, runner->input_addr);
+	if (runner->tls_alloc)
+		call_module_free(ctx, runner->tls_alloc);
+	if (runner->stack_alloc)
+		call_module_free(ctx, runner->stack_alloc);
+	if (runner->instance)
+		ctx->wasm_decomp_instance_destroy(runner->instance);
+	free(runner->thread_reply);
+
+	// Release the slot while keeping its mutex for the next thread to use it
+	rl_mutex_lock(&ctx->mutex);
+	runner->instance = NULL;
+	runner->thread_id = runner->stack_alloc = runner->tls_alloc = runner->input_addr = 0;
+	runner->thread_handle = NULL;
+	runner->thread_reply = NULL;
+	runner->creating = runner->joining = runner->in_use = 0;
+	rl_mutex_unlock(&ctx->mutex);
+}
+
+#ifdef _WIN32
+static unsigned __stdcall wahe_translated_thread_main(void *argument)
+#else
+static void *wahe_translated_thread_main(void *argument)
+#endif
+{
+	// Run the module's thread entry on the worker's own runner
+	wahe_wasm_decomp_runner_t *runner = argument;
+	wahe_cur_chain = NULL;
+	char *reply = call_module_func_on_runner(runner->module, runner->runner_id, runner->input_addr, WAHE_FUNC_THREAD_ENTRY, 0);
+	if (reply)
+		runner->thread_reply = make_string_copy(reply);
+	return 0;
+}
+
+static size_t wahe_create_translated_thread(wahe_module_t *ctx, size_t stack_size, const char *message, const char **failure)
+{
+	// Require shared memory, the runner ABI and the thread entry point
+	void *(*create_runner)(void *) = dynlib_find_symbol(ctx->native, "wasm_decomp_instance_create_runner");
+	int8_t *shared_memory = dynlib_find_symbol(ctx->native, "wasm_decomp_memory_is_shared");
+	size_t *stack_index = dynlib_find_symbol(ctx->native, "wasm_decomp_stack_pointer_global_index");
+	*failure = "requires a translated module with shared memory, an exported stack pointer and module_thread_entry";
+	if (!ctx->valid || ctx->wasm_decomp_runner == NULL || create_runner == NULL || shared_memory == NULL || !*shared_memory ||
+		stack_index == NULL || ctx->dl_func[WAHE_FUNC_THREAD_ENTRY] == NULL)
+		return 0;
+	*failure = "stack size must be positive and representable";
+	size_t address_max = ctx->memory_bits == 32 ? UINT32_MAX : SIZE_MAX;
+	if (!stack_size || stack_size > address_max - 30)
+		return 0;
+	stack_size = (stack_size + 15) & ~(size_t) 15;
+
+	// Claim a free slot after the configured runners
+	rl_mutex_lock(&ctx->mutex);
+	*failure = "module is shutting down";
+	if (ctx->decomp_threads_stopping)
+	{
+		rl_mutex_unlock(&ctx->mutex);
+		return 0;
+	}
+	size_t slot = ctx->decomp_initial_runner_count;
+	while (slot < ctx->decomp_runner_capacity && ctx->wasm_decomp_runner[slot].in_use)
+		slot++;
+	*failure = "too many threads, see WAHE_TRANSLATED_MAX_THREADS";
+	if (slot == ctx->decomp_runner_capacity || !ctx->decomp_next_thread_id)
+	{
+		rl_mutex_unlock(&ctx->mutex);
+		return 0;
+	}
+	wahe_wasm_decomp_runner_t *runner = &ctx->wasm_decomp_runner[slot];
+	if (!runner->mutex_initialized)
+	{
+		rl_mutex_init(&runner->mutex);
+		runner->mutex_initialized = 1;
+	}
+	runner->in_use = runner->creating = 1;
+	runner->module = ctx;
+	runner->runner_id = slot;
+	runner->thread_id = ctx->decomp_next_thread_id++;
+	if (slot >= ctx->runner_count)
+		ctx->runner_count = slot + 1;
+	rl_mutex_unlock(&ctx->mutex);
+
+	// Create the instance with its own globals and give it a stack on the module heap
+	int initialized = 0;
+	*failure = "translated runner creation failed";
+	runner->instance = create_runner(ctx->wasm_decomp_instance);
+	void *stack_pointer = runner->instance ? ctx->wasm_decomp_instance_global_address(runner->instance, *stack_index) : NULL;
+	if (stack_pointer)
+	{
+		*failure = "module stack allocation failed";
+		runner->stack_alloc = call_module_malloc(ctx, stack_size + 15);
+		size_t stack_start = (runner->stack_alloc + 15) & ~(size_t) 15;
+		size_t memory_size = wahe_get_module_memory_size(ctx);
+		if (runner->stack_alloc && stack_start <= memory_size && stack_size <= memory_size - stack_start && stack_start + stack_size <= address_max)
+		{
+			// Fill the stack with the blank pattern and point the stack pointer at its top
+			memset(ctx->memory_ptr + stack_start, WAHE_STACK_BLANK_PATTERN, stack_size);
+			if (ctx->memory_bits == 32)
+				*(uint32_t *) stack_pointer = stack_start + stack_size;
+			else
+				*(uint64_t *) stack_pointer = stack_start + stack_size;
+			*failure = "TLS initialization failed; export __tls_size, __tls_align and __wasm_init_tls";
+			initialized = wahe_init_translated_tls(ctx, slot, 1, &runner->tls_alloc);
+		}
+	}
+
+	// Copy the opaque input into shared module memory owned until join
+	if (initialized)
+	{
+		*failure = "entry message allocation failed";
+		size_t length = strlen(message) + 1;
+		runner->input_addr = call_module_malloc(ctx, length);
+		initialized = runner->input_addr != 0;
+		if (initialized)
+			memcpy(ctx->memory_ptr + runner->input_addr, message, length);
+	}
+
+	// Start one OS thread after its full guest context is ready
+	if (initialized)
+	{
+		*failure = "OS thread creation failed";
+		#ifdef _WIN32
+		runner->thread_handle = (void *) _beginthreadex(NULL, 0, wahe_translated_thread_main, runner, 0, NULL);
+		initialized = runner->thread_handle != NULL;
+		#else
+		pthread_t *handle = malloc(sizeof(*handle));
+		initialized = handle && pthread_create(handle, NULL, wahe_translated_thread_main, runner) == 0;
+		if (initialized)
+			runner->thread_handle = handle;
+		else
+			free(handle);
+		#endif
+	}
+	size_t id = initialized ? runner->thread_id : 0;
+	if (!initialized)
+		wahe_delete_translated_thread(ctx, runner);
+	else
+	{
+		// Publish the join handle only after the OS thread has been created successfully
+		rl_mutex_lock(&ctx->mutex);
+		runner->creating = 0;
+		rl_mutex_unlock(&ctx->mutex);
+	}
+	return id;
+}
+
+static int wahe_join_translated_thread(wahe_module_t *ctx, size_t id, char **reply, const char **failure)
+{
+	// Claim the thread once without holding a module lock during its execution
+	*failure = "unknown thread ID or thread already being joined";
+	*reply = NULL;
+	rl_mutex_lock(&ctx->mutex);
+	wahe_wasm_decomp_runner_t *runner = NULL;
+	for (size_t i = ctx->decomp_initial_runner_count; ctx->wasm_decomp_runner && i < ctx->decomp_runner_capacity; i++)
+	{
+		wahe_wasm_decomp_runner_t *r = &ctx->wasm_decomp_runner[i];
+		if (r->in_use && r->thread_id == id && !r->creating && !r->joining)
+			runner = r;
+	}
+	if (runner && wahe_cur_native_module == ctx && wahe_cur_native_runner_id == runner->runner_id)
+	{
+		// Reject self-joins rather than waiting forever
+		*failure = "a thread cannot join itself";
+		runner = NULL;
+	}
+	if (runner)
+		runner->joining = 1;
+	rl_mutex_unlock(&ctx->mutex);
+	if (!runner)
+		return 0;
+
+	// Wait for completion and release the platform's joinable thread handle
+	#ifdef _WIN32
+	int joined = WaitForSingleObject(runner->thread_handle, INFINITE) == WAIT_OBJECT_0;
+	if (joined)
+		CloseHandle(runner->thread_handle);
+	#else
+	int joined = pthread_join(*(pthread_t *) runner->thread_handle, NULL) == 0;
+	if (joined)
+		free(runner->thread_handle);
+	#endif
+	if (!joined)
+	{
+		// Leave the handle joinable after an OS-level wait failure
+		rl_mutex_lock(&ctx->mutex);
+		runner->joining = 0;
+		rl_mutex_unlock(&ctx->mutex);
+		*failure = "OS thread join failed";
+		return 0;
+	}
+
+	// Transfer the copied result before freeing the worker's resources on the calling runner
+	*reply = runner->thread_reply;
+	runner->thread_reply = NULL;
+	wahe_delete_translated_thread(ctx, runner);
+	return 1;
+}
+
+static size_t wahe_translated_thread_id(wahe_module_t *ctx)
+{
+	// Identify the dynamically created worker running on this OS thread, 0 for the configured runners
+	if (ctx->type != WAHE_MODULE_WASM_TO_NATIVE || ctx->wasm_decomp_runner == NULL || wahe_cur_native_module != ctx)
+		return 0;
+	return ctx->wasm_decomp_runner[wahe_cur_native_runner_id].thread_id;
+}
+
+static void wahe_join_translated_threads(wahe_module_t *ctx)
+{
+	// Prevent new workers, then ask the running ones to stop
+	if (wahe_translated_thread_id(ctx))
+	{
+		fprintf_rl(stderr, "Cannot shut down threads of module %s from one of its workers\n", ctx->module_name);
+		return;
+	}
+	rl_mutex_lock(&ctx->mutex);
+	ctx->decomp_threads_stopping = 1;
+	int notify = 0;
+	for (size_t i = ctx->decomp_initial_runner_count; i < ctx->decomp_runner_capacity; i++)
+		if (ctx->wasm_decomp_runner[i].in_use)
+			notify = 1;
+	rl_mutex_unlock(&ctx->mutex);
+	if (notify && ctx->dl_func[WAHE_FUNC_INPUT])
+		wahe_send_input(ctx, "Stop threads");
+
+	for (;;)
+	{
+		// Join each unclaimed worker while respecting concurrent joins
+		size_t id = 0, remaining = 0;
+		rl_mutex_lock(&ctx->mutex);
+		for (size_t i = ctx->decomp_initial_runner_count; i < ctx->decomp_runner_capacity; i++)
+		{
+			wahe_wasm_decomp_runner_t *r = &ctx->wasm_decomp_runner[i];
+			if (r->in_use)
+			{
+				remaining++;
+				if (!r->creating && !r->joining)
+					id = r->thread_id;
+			}
+		}
+		rl_mutex_unlock(&ctx->mutex);
+		if (!remaining)
+			return;
+		if (id)
+		{
+			// Discard the optional result during shutdown
+			char *reply = NULL;
+			const char *failure;
+			if (wahe_join_translated_thread(ctx, id, &reply, &failure))
+				free(reply);
+		}
+		else
+		{
+			// Let in-flight joins finish without spinning on the registry
+			#ifdef _WIN32
+			Sleep(1);
+			#else
+			usleep(1000);
+			#endif
+		}
+	}
+}
+
 void wahe_module_join_threads(wahe_module_t *ctx)
 {
+	// Translated modules manage their own workers whatever runtime the host has
+	if (ctx && ctx->type == WAHE_MODULE_WASM_TO_NATIVE && ctx->wasm_decomp_runner)
+	{
+		wahe_join_translated_threads(ctx);
+		return;
+	}
+
 	#ifdef WAHE_WASMTIME
 	// Prevent new workers before waiting for all existing workers to finish cooperatively
 	if (!ctx || ctx->type != WAHE_MODULE_WASMTIME)

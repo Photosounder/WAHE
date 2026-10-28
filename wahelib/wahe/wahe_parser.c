@@ -130,26 +130,58 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 				continue;
 			}
 
-			// Parse the optional WebAssembly runner count
+			// Parse the optional comma-separated module options: a WebAssembly runner count and native translation or sandboxing
 			size_t runner_count = 1;
-			int runner_count_end = 0;
-			int runner_count_valid = 1;
-			const char *module_suffix = &line[n[3]+1];
-			if (strstr(module_suffix, ", runners") == module_suffix)
+			enum wahe_module_backend backend = WAHE_BACKEND_DEFAULT;
+			int options_valid = 1;
+			const char *option = &line[n[3]+1];
+			while (options_valid)
 			{
-				sscanf(module_suffix, ", runners %zu%n", &runner_count, &runner_count_end);
-				const char *runner_text = &module_suffix[sizeof(", runners")-1];
-				while (*runner_text == ' ' || *runner_text == '\t')
-					runner_text++;
-				if (*runner_text < '0' || *runner_text > '9' || runner_count_end == 0)
-					runner_count_valid = 0;
-				for (const char *end = &module_suffix[runner_count_end]; *end; end++)
-					if (*end != ' ' && *end != '\t' && *end != '\r')
-						runner_count_valid = 0;
+				// Each option follows a comma, the line ending after the last one
+				while (*option == ' ' || *option == '\t' || *option == '\r')
+					option++;
+				if (*option == '\0')
+					break;
+				if (*option != ',')
+				{
+					options_valid = 0;
+					break;
+				}
+				option++;
+				while (*option == ' ' || *option == '\t')
+					option++;
+
+				// Match one option word followed by the end of the option
+				int len = 0;
+				if (strncmp(option, "runners", 7) == 0 && (option[7] == ' ' || option[7] == '\t'))
+				{
+					const char *number = &option[7];
+					while (*number == ' ' || *number == '\t')
+						number++;
+					if (*number < '0' || *number > '9' || sscanf(number, "%zu%n", &runner_count, &len) != 1 || runner_count == 0)
+						options_valid = 0;
+					option = &number[len];
+					len = 0;
+				}
+				else if (strncmp(option, "native", 6) == 0 && backend == WAHE_BACKEND_DEFAULT)
+				{
+					backend = WAHE_BACKEND_NATIVE;
+					len = 6;
+				}
+				else if (strncmp(option, "sandboxed", 9) == 0 && backend == WAHE_BACKEND_DEFAULT)
+				{
+					backend = WAHE_BACKEND_SANDBOXED;
+					len = 9;
+				}
+				else
+					options_valid = 0;
+				option += len;
+				if (*option != '\0' && *option != ',' && *option != ' ' && *option != '\t' && *option != '\r')
+					options_valid = 0;
 			}
-			if (runner_count == 0 || !runner_count_valid)
+			if (!options_valid)
 			{
-				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Invalid module runner count in \"%s\".\n", filepath, il, line);
+				bufprintf(err_log, "WAHE file parsing error. In file %s line %d: Invalid module options in \"%s\", expected \", runners N\", \", native\" or \", sandboxed\".\n", filepath, il, line);
 				free(module_path);
 				free(module_name);
 				continue;
@@ -172,11 +204,11 @@ void wahe_file_parse(wahe_group_t *group, char *filepath, buffer_t *err_log)
 
 			// Load module
 			if (check_file_is_readable(module_path))
-				wahe_module_init(group, is, &group->module[is], module_path, runner_count);
+				wahe_module_init_with_backend(group, is, &group->module[is], module_path, runner_count, backend);
 			else
 			{
 				char *actual_path = append_name_to_path(NULL, dir_path, module_path);
-				wahe_module_init(group, is, &group->module[is], actual_path, runner_count);
+				wahe_module_init_with_backend(group, is, &group->module[is], actual_path, runner_count, backend);
 			}
 			free(module_path);
 

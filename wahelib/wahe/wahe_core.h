@@ -34,6 +34,23 @@ enum wahe_module_type
 	WAHE_MODULE_NATIVE
 };
 
+// When Wasm modules are translated to native DLLs with wasm2native.dll, in builds defining WAHE_WASM2NATIVE
+enum wahe_wasm2native_mode
+{
+	WAHE_WASM2NATIVE_OFF,		// Always use the WebAssembly runtime
+	WAHE_WASM2NATIVE_CACHED,	// Use a translation that was already built, never build one
+	WAHE_WASM2NATIVE_AUTO,		// Use a cached translation, otherwise use the runtime and build the translation in the background for the next launch
+	WAHE_WASM2NATIVE_ALWAYS		// Use the translation, building it first if needed
+};
+
+// Per-module choice from the .wahe Module line
+enum wahe_module_backend
+{
+	WAHE_BACKEND_DEFAULT,		// Follow the host's wasm2native mode
+	WAHE_BACKEND_NATIVE,		// ", native": translate even 64-bit memory modules, waiting for the build if needed
+	WAHE_BACKEND_SANDBOXED		// ", sandboxed": always use the WebAssembly runtime
+};
+
 typedef struct wahe_module_t wahe_module_t;
 
 typedef struct
@@ -46,7 +63,19 @@ typedef struct
 {
 	void *instance;
 	rl_mutex_t mutex;
+
+	// Threads created with "Create thread with", in the slots after the configured runners
+	wahe_module_t *module;
+	size_t runner_id, thread_id, stack_alloc, tls_alloc, input_addr;
+	void *thread_handle;
+	char *thread_reply;
+	int in_use, mutex_initialized, creating, joining;
 } wahe_wasm_decomp_runner_t;
+
+// Most threads a translated module can have running at once besides its configured runners
+#ifndef WAHE_TRANSLATED_MAX_THREADS
+  #define WAHE_TRANSLATED_MAX_THREADS 256
+#endif
 
 #ifdef WAHE_WASMTIME
 typedef struct
@@ -126,8 +155,11 @@ struct wahe_module_t
 
 	// Specific to native modules
 	void *native, *dl_func[WAHE_FUNC_COUNT];
+	char *native_translation_path;	// wasm2native DLL loaded in place of the Wasm module, or NULL
 	void *wasm_decomp_instance;
-	wahe_wasm_decomp_runner_t *wasm_decomp_runner;
+	wahe_wasm_decomp_runner_t *wasm_decomp_runner;	// Never reallocated, with room for WAHE_TRANSLATED_MAX_THREADS threads
+	size_t decomp_initial_runner_count, decomp_runner_capacity, decomp_next_thread_id;
+	int decomp_threads_stopping;
 	void *(*wasm_decomp_instance_enter)(void *instance);
 	void (*wasm_decomp_instance_leave)(void *previous);
 	void (*wasm_decomp_instance_destroy)(void *instance);
@@ -239,6 +271,12 @@ extern size_t module_sprintf_alloc(wahe_module_t *ctx, const char* format, ...);
 extern char *wahe_send_input(wahe_module_t *ctx, const char *format, ...);
 extern void wahe_register_host_commands(wahe_group_t *group);
 extern void wahe_module_init(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count);
+extern void wahe_module_init_with_backend(wahe_group_t *parent_group, int module_index, wahe_module_t *ctx, const char *path, size_t runner_count, enum wahe_module_backend backend);
+
+// Host-wide wasm2native settings, NULL cache_dir meaning <appdata>/WAHE/native_cache and NULL lib_path meaning wasm2native.dll.
+// Without a call the mode comes from the WAHE_WASM2NATIVE environment variable (off, cached, auto or always), auto by default.
+extern void wahe_wasm2native_set_mode(enum wahe_wasm2native_mode mode, const char *cache_dir, const char *lib_path);
+extern int wahe_wasm2native_parse_mode(const char *name, enum wahe_wasm2native_mode *mode);
 extern void wahe_module_join_threads(wahe_module_t *ctx);
 extern size_t wahe_get_module_memory_size(wahe_module_t *ctx);
 // Call only after excluding all runners and host accesses to this module's memory
